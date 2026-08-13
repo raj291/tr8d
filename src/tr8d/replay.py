@@ -1,13 +1,15 @@
 from __future__ import annotations
 
-import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+from .data import validate_price_panel
 from .domain import Action, PriceBar, Proposal, Wallet
 from .features import bars_by_symbol, build_features, training_rows
 from .model import LogisticBaseline
+from .manifest import create_manifest
+from .metrics import baselines, performance
 from .risk import RiskGovernor
 from .simulator import PaperSimulator
 from .store import Store
@@ -36,20 +38,27 @@ def _proposal(strategy: Strategy, symbol: str, probability: float, expected: flo
     return Proposal(symbol, Action.HOLD, 0.0, max(probability, 1 - probability), "edge below gate")
 
 
-def replay(bars: list[PriceBar], database: str, source: str, seed: int = 7, warmup: int = 80) -> dict[str, float]:
+def replay(
+    bars: list[PriceBar], database: str, source: str, seed: int = 7, warmup: int = 80,
+    manifest_directory: str = "data/manifests",
+) -> dict:
     grouped = bars_by_symbol(bars)
+    validate_price_panel(bars)
     if not grouped:
         raise ValueError("no prices supplied")
     if any(len(history) < warmup + 1 for history in grouped.values()):
         raise ValueError(f"each symbol requires at least {warmup + 1} rows")
-    digest = hashlib.sha256(
-        "".join(f"{b.symbol}|{b.trading_date}|{b.open}|{b.close}|{b.available_at}" for b in bars).encode()
-    ).hexdigest()[:12]
-    run_id = f"run-{digest}-{seed}"
+    manifest = create_manifest(bars, source)
+    manifest_path = manifest.write(manifest_directory)
+    run_id = f"run-{manifest.content_sha256[:12]}-{seed}"
     store = Store(database)
     store.start_run(run_id, datetime.now(timezone.utc).isoformat(), seed, source)
+    store.manifest(run_id, manifest.version, manifest.content_sha256, str(manifest_path), json.dumps(manifest.__dict__, sort_keys=True))
     store.prices(run_id, bars)
     wallets = {strategy.agent_id: Wallet(10.0, {}) for strategy in STRATEGIES}
+    equity_history = {strategy.agent_id: [10.0] for strategy in STRATEGIES}
+    trade_counts = {strategy.agent_id: 0 for strategy in STRATEGIES}
+    traded_notional = {strategy.agent_id: 0.0 for strategy in STRATEGIES}
     governor = RiskGovernor()
     simulator = PaperSimulator()
     dates = sorted({bar.trading_date for bar in bars})
@@ -84,6 +93,8 @@ def replay(bars: list[PriceBar], database: str, source: str, seed: int = 7, warm
                     wallet, fill, quantity = simulator.execute(wallet, proposal, risk.approved_notional, current.open)
                     wallets[strategy.agent_id] = wallet
                     store.trade(decision_id, fill, quantity, risk.approved_notional)
+                    trade_counts[strategy.agent_id] += 1
+                    traded_notional[strategy.agent_id] += risk.approved_notional
         for strategy in STRATEGIES:
             wallet = wallets[strategy.agent_id]
             marks = dict(close_marks)
@@ -92,6 +103,15 @@ def replay(bars: list[PriceBar], database: str, source: str, seed: int = 7, warm
                     prior = [b.close for b in grouped[held_symbol] if b.trading_date < decision_date]
                     marks[held_symbol] = prior[-1]
             store.snapshot(run_id, strategy.agent_id, decision_date.isoformat(), wallet.cash, wallet.equity(marks), wallet.quantities)
+            equity_history[strategy.agent_id].append(wallet.equity(marks))
         store.commit()
-    final_marks = {symbol: history[-1].close for symbol, history in grouped.items()}
-    return {agent_id: round(wallet.equity(final_marks), 4) for agent_id, wallet in wallets.items()}
+    agents = {
+        agent_id: performance(equity_history[agent_id], trade_counts[agent_id], traded_notional[agent_id]).as_dict()
+        for agent_id in wallets
+    }
+    return {
+        "run_id": run_id,
+        "manifest": str(manifest_path),
+        "agents": agents,
+        "baselines": baselines(bars, dates[warmup:]),
+    }

@@ -2,6 +2,9 @@ __pycache__/
 *.py[cod]
 .venv/
 var/
+data/raw/
+data/processed/
+data/manifests/
 *.db
 *.sqlite3
 dist/
