@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tr8d"
+version = "0.1.0"
+description = "Point-in-time paper-trading research simulator"
+requires-python = ">=3.11"
+dependencies = ["numpy>=1.26"]
+
+[project.scripts]
+tr8d = "tr8d.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
