@@ -24,6 +24,10 @@ class PriceBar:
             raise ValueError("symbol is required")
         if self.open <= 0 or self.close <= 0:
             raise ValueError("prices must be positive")
+        if self.available_at.tzinfo is None:
+            raise ValueError("available_at must be timezone-aware")
+        if self.available_at.date() < self.trading_date:
+            raise ValueError("available_at cannot precede the trading date")
 
 
 @dataclass(frozen=True)

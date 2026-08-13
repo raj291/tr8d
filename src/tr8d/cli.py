@@ -4,7 +4,8 @@ import argparse
 import json
 import sqlite3
 
-from .data import load_price_csv, synthetic_prices
+from .data import load_price_csv, load_stooq_csv, synthetic_prices, write_normalized_csv
+from .manifest import create_manifest
 from .replay import replay
 
 
@@ -15,9 +16,15 @@ def _parser() -> argparse.ArgumentParser:
     demo.add_argument("--database", default="var/tr8d.db")
     demo.add_argument("--days", type=int, default=800)
     demo.add_argument("--seed", type=int, default=7)
+    demo.add_argument("--manifest-directory", default="data/manifests")
     real = sub.add_parser("replay", help="replay an OHLC CSV")
     real.add_argument("csv")
     real.add_argument("--database", default="var/tr8d.db")
+    real.add_argument("--manifest-directory", default="data/manifests")
+    ingest = sub.add_parser("ingest-stooq", help="normalize downloaded Stooq daily CSV files")
+    ingest.add_argument("inputs", nargs="+", metavar="SYMBOL=PATH")
+    ingest.add_argument("--output", default="data/processed/stooq_prices.csv")
+    ingest.add_argument("--manifest-directory", default="data/manifests")
     inspect = sub.add_parser("inspect", help="show latest run results")
     inspect.add_argument("--database", default="var/tr8d.db")
     return parser
@@ -26,11 +33,21 @@ def _parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = _parser().parse_args()
     if args.command == "demo":
-        result = replay(synthetic_prices(args.days, args.seed), args.database, "synthetic", args.seed)
+        result = replay(synthetic_prices(args.days, args.seed), args.database, "synthetic", args.seed, manifest_directory=args.manifest_directory)
         print(json.dumps(result, indent=2, sort_keys=True))
     elif args.command == "replay":
-        result = replay(load_price_csv(args.csv), args.database, args.csv)
+        result = replay(load_price_csv(args.csv), args.database, args.csv, manifest_directory=args.manifest_directory)
         print(json.dumps(result, indent=2, sort_keys=True))
+    elif args.command == "ingest-stooq":
+        bars = []
+        for value in args.inputs:
+            if "=" not in value:
+                raise SystemExit(f"invalid input {value!r}; expected SYMBOL=PATH")
+            symbol, path = value.split("=", 1)
+            bars.extend(load_stooq_csv(path, symbol))
+        write_normalized_csv(bars, args.output)
+        manifest = create_manifest(bars, "stooq").write(args.manifest_directory)
+        print(json.dumps({"output": args.output, "manifest": str(manifest), "rows": len(bars)}, indent=2))
     else:
         connection = sqlite3.connect(args.database)
         rows = connection.execute(

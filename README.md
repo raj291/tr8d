@@ -14,6 +14,7 @@ before news, RAG, or an LLM is allowed to influence a trade:
 - fractional-share paper execution at the daily open with slippage;
 - SQLite audit records for runs, decisions, trades, and portfolio snapshots;
 - reproducible demo data and automated invariant tests.
+- versioned data manifests and baseline-relative performance reports.
 
 ## Run it
 
@@ -27,7 +28,25 @@ python3 -m unittest discover -s tests -v
 
 The demo creates deterministic synthetic daily data for `XLK`, `XLE`, and
 `XLF`, trains only on observations preceding each replay date, and gives each
-strategy an independent $10 wallet.
+strategy an independent $10 wallet. Its JSON report includes return, maximum
+drawdown, annualized volatility, turnover, trade count, and cash/buy-and-hold/
+equal-weight comparisons.
+
+## Ingest downloaded Stooq data
+
+Download one daily CSV per symbol from Stooq, then normalize and fingerprint
+the files:
+
+```bash
+python3 -m tr8d ingest-stooq \
+  XLK=data/raw/xlk.csv XLE=data/raw/xle.csv XLF=data/raw/xlf.csv \
+  --output data/processed/stooq_prices.csv
+
+python3 -m tr8d replay data/processed/stooq_prices.csv --database var/stooq.db
+```
+
+Every ingestion/replay writes a JSON manifest containing the source, symbols,
+date range, row count, and a SHA-256 digest of canonicalized rows.
 
 To replay a real CSV:
 

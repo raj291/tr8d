@@ -17,6 +17,11 @@ CREATE TABLE IF NOT EXISTS prices (
   open REAL NOT NULL, close REAL NOT NULL, available_at TEXT NOT NULL,
   PRIMARY KEY (run_id, symbol, trading_date), FOREIGN KEY (run_id) REFERENCES runs(id)
 );
+CREATE TABLE IF NOT EXISTS dataset_manifests (
+  run_id TEXT PRIMARY KEY, version TEXT NOT NULL, content_sha256 TEXT NOT NULL,
+  manifest_path TEXT NOT NULL, manifest_json TEXT NOT NULL,
+  FOREIGN KEY (run_id) REFERENCES runs(id)
+);
 CREATE TABLE IF NOT EXISTS decisions (
   id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, agent_id TEXT NOT NULL,
   symbol TEXT NOT NULL, decision_date TEXT NOT NULL, action TEXT NOT NULL,
@@ -51,6 +56,12 @@ class Store:
         self.connection.executemany(
             "INSERT INTO prices VALUES (?, ?, ?, ?, ?, ?)",
             [(run_id, b.symbol, b.trading_date.isoformat(), b.open, b.close, b.available_at.isoformat()) for b in bars],
+        )
+
+    def manifest(self, run_id: str, version: str, digest: str, path: str, manifest_json: str) -> None:
+        self.connection.execute(
+            "INSERT INTO dataset_manifests VALUES (?, ?, ?, ?, ?)",
+            (run_id, version, digest, path, manifest_json),
         )
 
     def decision(self, values: tuple) -> int:
