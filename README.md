@@ -48,6 +48,22 @@ python3 -m tr8d replay data/processed/stooq_prices.csv --database var/stooq.db
 Every ingestion/replay writes a JSON manifest containing the source, symbols,
 date range, row count, and a SHA-256 digest of canonicalized rows.
 
+## Compare numerical models
+
+Install the optional ML dependency and run the expanding-window evaluation:
+
+```bash
+python3 -m pip install -e '.[ml]'
+python3 -m tr8d evaluate-models data/processed/stooq_prices.csv \
+  --output var/model-evaluation.json
+```
+
+Each fold trains on the past, calibrates probabilities on a later dedicated
+period, and measures only the still-later test period. The report compares
+logistic regression and XGBoost using accuracy, balanced accuracy, Brier score,
+log loss, and expected calibration error. Its `promotion_candidate` is an
+evaluation result—not automatic deployment authority.
+
 To replay a real CSV:
 
 ```bash

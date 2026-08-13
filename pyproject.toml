@@ -9,6 +9,9 @@ description = "Point-in-time paper-trading research simulator"
 requires-python = ">=3.11"
 dependencies = ["numpy>=1.26"]
 
+[project.optional-dependencies]
+ml = ["scikit-learn>=1.8,<2", "xgboost>=3.4,<4"]
+
 [project.scripts]
 tr8d = "tr8d.cli:main"
 

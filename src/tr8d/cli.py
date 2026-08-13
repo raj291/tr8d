@@ -6,6 +6,7 @@ import sqlite3
 
 from .data import load_price_csv, load_stooq_csv, synthetic_prices, write_normalized_csv
 from .manifest import create_manifest
+from .evaluation import evaluate_models, write_model_report
 from .replay import replay
 
 
@@ -25,6 +26,11 @@ def _parser() -> argparse.ArgumentParser:
     ingest.add_argument("inputs", nargs="+", metavar="SYMBOL=PATH")
     ingest.add_argument("--output", default="data/processed/stooq_prices.csv")
     ingest.add_argument("--manifest-directory", default="data/manifests")
+    evaluate = sub.add_parser("evaluate-models", help="compare calibrated models with temporal folds")
+    evaluate.add_argument("csv", nargs="?", help="normalized price CSV; omit to use synthetic data")
+    evaluate.add_argument("--demo-days", type=int, default=320)
+    evaluate.add_argument("--seed", type=int, default=7)
+    evaluate.add_argument("--output", default="var/model-evaluation.json")
     inspect = sub.add_parser("inspect", help="show latest run results")
     inspect.add_argument("--database", default="var/tr8d.db")
     return parser
@@ -48,6 +54,12 @@ def main() -> None:
         write_normalized_csv(bars, args.output)
         manifest = create_manifest(bars, "stooq").write(args.manifest_directory)
         print(json.dumps({"output": args.output, "manifest": str(manifest), "rows": len(bars)}, indent=2))
+    elif args.command == "evaluate-models":
+        bars = load_price_csv(args.csv) if args.csv else synthetic_prices(args.demo_days, args.seed)
+        source = args.csv or "synthetic"
+        report = evaluate_models(bars, seed=args.seed)
+        report_path = write_model_report(report, bars, source, args.output)
+        print(json.dumps({"report": str(report_path), **report}, indent=2, sort_keys=True))
     else:
         connection = sqlite3.connect(args.database)
         rows = connection.execute(
