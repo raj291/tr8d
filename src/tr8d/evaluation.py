@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import numpy as np
@@ -35,7 +35,7 @@ class PlattCalibrator:
         self.iterations = iterations
         self.weights = np.zeros(2)
 
-    def fit(self, probabilities: np.ndarray, labels: np.ndarray) -> "PlattCalibrator":
+    def fit(self, probabilities: np.ndarray, labels: np.ndarray) -> PlattCalibrator:
         if len(probabilities) < 10 or len(np.unique(labels)) < 2:
             raise ValueError("calibration requires at least 10 rows across two classes")
         logits = np.log(np.clip(probabilities, 1e-6, 1 - 1e-6) / np.clip(1 - probabilities, 1e-6, 1))
@@ -100,7 +100,7 @@ def _metrics(labels: np.ndarray, probabilities: np.ndarray) -> dict[str, float]:
         if selected.any():
             calibration_error += float(np.mean(selected)) * abs(float(np.mean(probabilities[selected]) - np.mean(labels[selected])))
     return {
-        "rows": int(len(labels)),
+        "rows": len(labels),
         "accuracy": round(float(np.mean(predicted == positives)), 8),
         "balanced_accuracy": round((true_positive_rate + true_negative_rate) / 2, 8),
         "brier_score": round(float(np.mean((probabilities - labels) ** 2)), 8),
@@ -149,7 +149,7 @@ def evaluate_models(bars: list[PriceBar], models: tuple[str, ...] = ("logistic",
 def write_model_report(report: dict, bars: list[PriceBar], source: str, path: str | Path) -> Path:
     manifest = create_manifest(bars, source)
     payload = {
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": datetime.now(UTC).isoformat(),
         "dataset_version": manifest.version,
         "dataset_sha256": manifest.content_sha256,
         **report,

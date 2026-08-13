@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import UTC, datetime
 from pathlib import Path
 
+from .documents import Document
 from .domain import PriceBar
-
+from .explain import MoveExplanation
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -38,6 +40,17 @@ CREATE TABLE IF NOT EXISTS portfolio_snapshots (
   run_id TEXT NOT NULL, agent_id TEXT NOT NULL, trading_date TEXT NOT NULL,
   cash REAL NOT NULL, equity REAL NOT NULL, positions_json TEXT NOT NULL,
   PRIMARY KEY (run_id, agent_id, trading_date)
+);
+CREATE TABLE IF NOT EXISTS documents (
+  id TEXT PRIMARY KEY, source_type TEXT NOT NULL, external_id TEXT NOT NULL,
+  title TEXT NOT NULL, url TEXT NOT NULL, published_at TEXT NOT NULL,
+  available_at TEXT NOT NULL, ingested_at TEXT NOT NULL,
+  symbols_json TEXT NOT NULL, event_tags_json TEXT NOT NULL, metadata_json TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS move_explanations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT NOT NULL, trading_date TEXT NOT NULL,
+  explanation_json TEXT NOT NULL, created_at TEXT NOT NULL,
+  UNIQUE(symbol, trading_date)
 );
 """
 
@@ -79,5 +92,30 @@ class Store:
     def snapshot(self, run_id: str, agent_id: str, trading_date: str, cash: float, equity: float, positions: dict[str, float]) -> None:
         self.connection.execute("INSERT INTO portfolio_snapshots VALUES (?, ?, ?, ?, ?, ?)", (run_id, agent_id, trading_date, cash, equity, json.dumps(positions, sort_keys=True)))
 
+    def documents(self, documents: list[Document]) -> None:
+        self.connection.executemany(
+            """INSERT OR REPLACE INTO documents
+            (id, source_type, external_id, title, url, published_at, available_at, ingested_at,
+             symbols_json, event_tags_json, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [(
+                item.id, item.source_type, item.external_id, item.title, item.url,
+                item.published_at.isoformat(), item.available_at.isoformat(), item.ingested_at.isoformat(),
+                json.dumps(item.symbols), json.dumps(item.event_tags), json.dumps(item.metadata, sort_keys=True),
+            ) for item in documents],
+        )
+
+    def explanation(self, explanation: MoveExplanation) -> None:
+        self.connection.execute(
+            """INSERT OR REPLACE INTO move_explanations
+            (symbol, trading_date, explanation_json, created_at) VALUES (?, ?, ?, ?)""",
+            (
+                explanation.symbol, explanation.trading_date,
+                json.dumps(explanation.as_dict(), sort_keys=True), datetime.now(UTC).isoformat(),
+            ),
+        )
+
     def commit(self) -> None:
         self.connection.commit()
+
+    def close(self) -> None:
+        self.connection.close()

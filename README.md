@@ -64,6 +64,31 @@ logistic regression and XGBoost using accuracy, balanced accuracy, Brier score,
 log loss, and expected calibration error. Its `promotion_candidate` is an
 evaluation result—not automatic deployment authority.
 
+## Ingest evidence and explain large moves
+
+SEC access requires an identifying user agent with a contact email. GDELT DOC
+search is limited to its recent rolling window.
+
+```bash
+python3 -m tr8d fetch-sec --cik 0000320193 --symbol AAPL \
+  --user-agent 'tr8d research contact@example.com' \
+  --output data/documents/aapl-sec.jsonl
+
+python3 -m tr8d fetch-gdelt --query 'Apple Inc' --symbol AAPL \
+  --start 2026-08-12T00:00:00+00:00 --end 2026-08-13T21:00:00+00:00 \
+  --user-agent 'tr8d research contact@example.com' \
+  --output data/documents/aapl-news.jsonl
+
+python3 -m tr8d explain-move prices.csv data/documents/aapl-news.jsonl \
+  --symbol AAPL --sector XLK --market SPY --date 2026-08-13 \
+  --output var/aapl-2026-08-13-explanation.json
+```
+
+The explainer runs only after close, rejects evidence that was unavailable by
+the close, decomposes the move against sector and market returns, and reports
+likely driver categories, competing explanations, confidence, and an
+unexplained fraction. Article metadata is evidence—not proof of causality.
+
 To replay a real CSV:
 
 ```bash

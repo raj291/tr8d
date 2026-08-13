@@ -1,18 +1,17 @@
 from __future__ import annotations
 
-from datetime import date, datetime, time, timezone
+from datetime import UTC, date, datetime, time
 
 import numpy as np
 
 from .domain import Features, PriceBar
-
 
 FEATURE_NAMES = ("return_1d", "return_3d", "return_5d", "return_10d", "volatility_5d", "distance_5d")
 
 
 def decision_cutoff(decision_date: date) -> datetime:
     """Canonical pre-open cutoff for v1 (09:20 ET during daylight time)."""
-    return datetime.combine(decision_date, time(13, 20), tzinfo=timezone.utc)
+    return datetime.combine(decision_date, time(13, 20), tzinfo=UTC)
 
 
 def bars_by_symbol(bars: list[PriceBar]) -> dict[str, list[PriceBar]]:
