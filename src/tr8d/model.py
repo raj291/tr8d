@@ -17,7 +17,7 @@ class LogisticBaseline:
         self.weights: np.ndarray | None = None
         self.average_returns = (0.0, 0.0)
 
-    def fit(self, x: np.ndarray, y: np.ndarray, realized_returns: np.ndarray) -> "LogisticBaseline":
+    def fit(self, x: np.ndarray, y: np.ndarray, realized_returns: np.ndarray) -> LogisticBaseline:
         if len(x) < 30 or len(np.unique(y)) < 2:
             raise ValueError("training requires at least 30 rows across two classes")
         self.mean = x.mean(axis=0)
@@ -77,7 +77,7 @@ class XGBoostBaseline:
             random_state=seed,
         )
 
-    def fit(self, x: np.ndarray, y: np.ndarray, realized_returns: np.ndarray) -> "XGBoostBaseline":
+    def fit(self, x: np.ndarray, y: np.ndarray, realized_returns: np.ndarray) -> XGBoostBaseline:
         if len(x) < 30 or len(np.unique(y)) < 2:
             raise ValueError("training requires at least 30 rows across two classes")
         self.model.fit(x, y)

@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from .domain import PriceBar
@@ -48,5 +48,5 @@ def create_manifest(bars: list[PriceBar], source: str) -> DataManifest:
         end_date=max(dates).isoformat(),
         row_count=len(bars),
         content_sha256=digest,
-        created_at=datetime.now(timezone.utc).isoformat(),
+        created_at=datetime.now(UTC).isoformat(),
     )

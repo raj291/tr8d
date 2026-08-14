@@ -3,12 +3,10 @@ from __future__ import annotations
 import csv
 import math
 import random
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 
 from .domain import PriceBar
-
-UTC = timezone.utc
 
 
 def validate_price_panel(bars: list[PriceBar], require_aligned_dates: bool = True) -> None:
@@ -28,7 +26,7 @@ def validate_price_panel(bars: list[PriceBar], require_aligned_dates: bool = Tru
 
 
 def _parse_datetime(value: str) -> datetime:
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    parsed = datetime.fromisoformat(value)
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=UTC)
     return parsed.astimezone(UTC)
