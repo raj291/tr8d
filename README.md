@@ -89,6 +89,32 @@ the close, decomposes the move against sector and market returns, and reports
 likely driver categories, competing explanations, confidence, and an
 unexplained fraction. Article metadata is evidence—not proof of causality.
 
+## Temporal retrieval and agent memory
+
+The offline retrieval baseline uses deterministic hashed token vectors and a
+small transparent finance lexicon. It is useful for testing temporal filters,
+ranking, persistence, and tool contracts without downloading a model; it is
+not presented as a replacement for FinBERT or BGE embeddings.
+
+```bash
+python3 -m tr8d index-evidence data/documents/aapl-news.jsonl --database var/tr8d.db
+python3 -m tr8d search-evidence --query 'raised guidance earnings' --symbol AAPL \
+  --decision-time 2026-08-13T13:20:00+00:00 --database var/tr8d.db
+
+python3 -m tr8d write-memory --agent pattern --kind episodic \
+  --text 'Positive guidance was followed by a weak close' \
+  --created-at 2026-08-13T21:00:00+00:00 --available-at 2026-08-13T21:00:00+00:00
+python3 -m tr8d search-memory --agent pattern --query 'guidance weak close' \
+  --decision-time 2026-08-14T13:20:00+00:00
+```
+
+Evidence retrieval enforces `available_at <= decision_time`, limits repeated
+sources, and requires a matching symbol. Memory retrieval additionally requires
+an exact agent namespace, preventing another strategy's experience or a future
+outcome from entering the current decision context. Semantic lessons require
+at least three distinct supporting decision IDs, preventing a single lucky
+trade from being promoted into durable strategy knowledge.
+
 To replay a real CSV:
 
 ```bash

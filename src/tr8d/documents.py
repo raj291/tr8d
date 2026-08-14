@@ -42,6 +42,7 @@ class Document:
     symbols: tuple[str, ...]
     event_tags: tuple[str, ...]
     metadata: dict
+    content: str = ""
 
     def __post_init__(self) -> None:
         for field in (self.published_at, self.available_at, self.ingested_at):
