@@ -3,15 +3,18 @@ from __future__ import annotations
 import argparse
 import json
 import sqlite3
+from dataclasses import asdict
 from datetime import datetime
 
 from .data import load_price_csv, load_stooq_csv, synthetic_prices, write_normalized_csv
+from .decision import orchestrate_decision
 from .documents import (
     EvidenceClient,
     EvidenceFetchError,
     read_documents,
     write_documents,
 )
+from .domain import Prediction, Wallet
 from .evaluation import evaluate_models, write_model_report
 from .explain import explain_large_move, write_explanation
 from .manifest import create_manifest
@@ -87,6 +90,17 @@ def _parser() -> argparse.ArgumentParser:
     recall.add_argument("--query", required=True)
     recall.add_argument("--decision-time", required=True)
     recall.add_argument("--database", default="var/tr8d.db")
+    synthesize = sub.add_parser("synthesize-decision", help="build and gate a structured paper-trade proposal")
+    synthesize.add_argument("--agent", required=True)
+    synthesize.add_argument("--symbol", required=True)
+    synthesize.add_argument("--decision-time", required=True)
+    synthesize.add_argument("--bull-probability", type=float, required=True)
+    synthesize.add_argument("--expected-return", type=float, required=True)
+    synthesize.add_argument("--cash", type=float, default=10.0)
+    synthesize.add_argument("--positions", default="{}", help="JSON symbol-to-quantity mapping")
+    synthesize.add_argument("--marks", required=True, help="JSON symbol-to-price mapping from completed data")
+    synthesize.add_argument("--data-quality", type=float, default=1.0)
+    synthesize.add_argument("--database", default="var/tr8d.db")
     inspect = sub.add_parser("inspect", help="show latest run results")
     inspect.add_argument("--database", default="var/tr8d.db")
     return parser
@@ -188,6 +202,30 @@ def main() -> None:
                 "memory_id": memory.id, "kind": memory.kind, "text": memory.text,
                 "available_at": memory.available_at.isoformat(), "importance": memory.importance,
             } for memory in memories], indent=2))
+        elif args.command == "synthesize-decision":
+            store = Store(args.database)
+            outcome = orchestrate_decision(
+                agent_id=args.agent, symbol=args.symbol.upper(),
+                decision_time=datetime.fromisoformat(args.decision_time),
+                prediction=Prediction(args.bull_probability, args.expected_return),
+                wallet=Wallet(args.cash, {key.upper(): float(value) for key, value in json.loads(args.positions).items()}),
+                marks={key.upper(): float(value) for key, value in json.loads(args.marks).items()},
+                chunks=store.load_chunks(), memories=store.load_memories(),
+                data_quality=args.data_quality,
+            )
+            store.decision_outcome(outcome)
+            store.commit()
+            print(json.dumps({
+                "decision_id": outcome.context.decision_id,
+                "snapshot_hash": outcome.context.snapshot_hash,
+                "proposal": asdict(outcome.proposal),
+                "risk": asdict(outcome.risk),
+                "approved": outcome.approved,
+                "gate_reason": outcome.gate_reason,
+                "provider": outcome.context.provider_name,
+                "fallback_used": outcome.fallback_used,
+                "tools": [trace.name for trace in outcome.tool_traces],
+            }, indent=2, sort_keys=True))
         else:
             connection = sqlite3.connect(args.database)
             rows = connection.execute(
