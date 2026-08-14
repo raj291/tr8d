@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from .data import validate_price_panel
 from .domain import Action, PriceBar, Proposal, Wallet
 from .features import bars_by_symbol, build_features, training_rows
-from .model import LogisticBaseline
 from .manifest import create_manifest
 from .metrics import baselines, performance
+from .model import LogisticBaseline
 from .risk import RiskGovernor
 from .simulator import PaperSimulator
 from .store import Store
@@ -52,7 +52,7 @@ def replay(
     manifest_path = manifest.write(manifest_directory)
     run_id = f"run-{manifest.content_sha256[:12]}-{seed}"
     store = Store(database)
-    store.start_run(run_id, datetime.now(timezone.utc).isoformat(), seed, source)
+    store.start_run(run_id, datetime.now(UTC).isoformat(), seed, source)
     store.manifest(run_id, manifest.version, manifest.content_sha256, str(manifest_path), json.dumps(manifest.__dict__, sort_keys=True))
     store.prices(run_id, bars)
     wallets = {strategy.agent_id: Wallet(10.0, {}) for strategy in STRATEGIES}
