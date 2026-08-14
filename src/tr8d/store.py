@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .decision import DecisionOutcome
 from .documents import Document
 from .domain import PriceBar
 from .explain import MoveExplanation
@@ -65,6 +67,19 @@ CREATE TABLE IF NOT EXISTS agent_memories (
   id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, kind TEXT NOT NULL, memory_text TEXT NOT NULL,
   created_at TEXT NOT NULL, available_at TEXT NOT NULL, importance REAL NOT NULL,
   supporting_decision_ids_json TEXT NOT NULL, embedding_json TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS decision_runs (
+  decision_id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, symbol TEXT NOT NULL,
+  decision_time TEXT NOT NULL, snapshot_hash TEXT NOT NULL, provider_name TEXT NOT NULL,
+  proposal_action TEXT NOT NULL, proposal_json TEXT NOT NULL, risk_json TEXT NOT NULL,
+  approved INTEGER NOT NULL, fallback_used INTEGER NOT NULL,
+  gate_reason TEXT NOT NULL, created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS tool_calls (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, decision_id TEXT NOT NULL, sequence INTEGER NOT NULL,
+  tool_name TEXT NOT NULL, called_at TEXT NOT NULL, arguments_hash TEXT NOT NULL,
+  result_count INTEGER NOT NULL, success INTEGER NOT NULL,
+  UNIQUE(decision_id, sequence), FOREIGN KEY (decision_id) REFERENCES decision_runs(decision_id)
 );
 """
 
@@ -178,6 +193,32 @@ class Store:
             importance=row[6], supporting_decision_ids=tuple(json.loads(row[7])),
             embedding=tuple(json.loads(row[8])),
         ) for row in rows]
+
+    def decision_outcome(self, outcome: DecisionOutcome) -> None:
+        self.connection.execute(
+            """INSERT OR REPLACE INTO decision_runs
+            (decision_id, agent_id, symbol, decision_time, snapshot_hash, provider_name,
+             proposal_action, proposal_json, risk_json, approved, fallback_used, gate_reason, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                outcome.context.decision_id, outcome.context.agent_id, outcome.context.symbol,
+                outcome.context.decision_time.isoformat(), outcome.context.snapshot_hash,
+                outcome.context.provider_name, outcome.proposal.action,
+                json.dumps(asdict(outcome.proposal), sort_keys=True),
+                json.dumps(asdict(outcome.risk), sort_keys=True), int(outcome.approved),
+                int(outcome.fallback_used), outcome.gate_reason, datetime.now(UTC).isoformat(),
+            ),
+        )
+        self.connection.execute("DELETE FROM tool_calls WHERE decision_id = ?", (outcome.context.decision_id,))
+        self.connection.executemany(
+            """INSERT INTO tool_calls
+            (decision_id, sequence, tool_name, called_at, arguments_hash, result_count, success)
+            VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            [(
+                outcome.context.decision_id, sequence, trace.name, trace.called_at.isoformat(),
+                trace.arguments_hash, trace.result_count, int(trace.success),
+            ) for sequence, trace in enumerate(outcome.tool_traces)],
+        )
 
     def commit(self) -> None:
         self.connection.commit()

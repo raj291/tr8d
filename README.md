@@ -115,6 +115,27 @@ outcome from entering the current decision context. Semantic lessons require
 at least three distinct supporting decision IDs, preventing a single lucky
 trade from being promoted into durable strategy knowledge.
 
+## Structured decision synthesis
+
+The decision layer builds an immutable snapshot from an allowlisted tool set,
+asks a provider for an exact schema, validates every citation and timestamp,
+and sends non-HOLD proposals to the deterministic risk governor. The included
+provider is deliberately rule-based and fail-closed; a local or API LLM must
+implement the same interface and pass the same gates before it can replace it.
+
+```bash
+python3 -m tr8d synthesize-decision \
+  --agent pattern --symbol AAPL \
+  --decision-time 2026-08-14T13:20:00+00:00 \
+  --bull-probability 0.67 --expected-return 0.005 \
+  --cash 10 --positions '{}' --marks '{"AAPL": 225.50}' \
+  --data-quality 0.95 --database var/tr8d.db
+```
+
+Every run stores its snapshot hash, structured proposal, gate result, risk
+result, and ordered tool trace. Invalid provider output is converted to HOLD;
+the provider never mutates wallets or invokes the execution simulator.
+
 To replay a real CSV:
 
 ```bash
