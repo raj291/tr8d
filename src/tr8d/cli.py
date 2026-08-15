@@ -4,7 +4,7 @@ import argparse
 import json
 import sqlite3
 from dataclasses import asdict
-from datetime import datetime
+from datetime import date, datetime
 
 from .data import load_price_csv, load_stooq_csv, synthetic_prices, write_normalized_csv
 from .decision import orchestrate_decision
@@ -16,6 +16,7 @@ from .documents import (
 )
 from .domain import Prediction, Wallet
 from .evaluation import evaluate_models, write_model_report
+from .execution import ExecutionRejected, PaperExecutionEngine, WalletAlreadyExists
 from .explain import explain_large_move, write_explanation
 from .manifest import create_manifest
 from .memory import create_memory, rank_memories
@@ -101,6 +102,25 @@ def _parser() -> argparse.ArgumentParser:
     synthesize.add_argument("--marks", required=True, help="JSON symbol-to-price mapping from completed data")
     synthesize.add_argument("--data-quality", type=float, default=1.0)
     synthesize.add_argument("--database", default="var/tr8d.db")
+    initialize = sub.add_parser("init-wallet", help="initialize a persistent paper wallet once")
+    initialize.add_argument("--agent", required=True)
+    initialize.add_argument("--cash", type=float, default=10.0)
+    initialize.add_argument("--database", default="var/tr8d.db")
+    execute = sub.add_parser("execute-approved", help="atomically execute an approved paper decision")
+    execute.add_argument("--decision-id", required=True)
+    execute.add_argument("--open-price", type=float, required=True)
+    execute.add_argument("--executed-at", help="timezone-aware ISO timestamp; defaults to now")
+    execute.add_argument("--database", default="var/tr8d.db")
+    close = sub.add_parser("post-close", help="mark a paper wallet and create outcome memories")
+    close.add_argument("--agent", required=True)
+    close.add_argument("--date", required=True)
+    close.add_argument("--available-at", required=True)
+    close.add_argument("--marks", required=True, help="JSON symbol-to-close-price mapping")
+    close.add_argument("--database", default="var/tr8d.db")
+    wallet = sub.add_parser("wallet-status", help="show persistent paper wallet state")
+    wallet.add_argument("--agent", required=True)
+    wallet.add_argument("--marks", default="{}", help="optional JSON marks for equity")
+    wallet.add_argument("--database", default="var/tr8d.db")
     inspect = sub.add_parser("inspect", help="show latest run results")
     inspect.add_argument("--database", default="var/tr8d.db")
     return parser
@@ -226,6 +246,33 @@ def main() -> None:
                 "fallback_used": outcome.fallback_used,
                 "tools": [trace.name for trace in outcome.tool_traces],
             }, indent=2, sort_keys=True))
+        elif args.command == "init-wallet":
+            store = Store(args.database)
+            wallet_state = PaperExecutionEngine(store).initialize_wallet(args.agent, args.cash)
+            print(json.dumps({"agent_id": args.agent, "cash": wallet_state.cash, "positions": {}}, indent=2))
+        elif args.command == "execute-approved":
+            store = Store(args.database)
+            receipt = PaperExecutionEngine(store).execute_decision(
+                args.decision_id, args.open_price,
+                datetime.fromisoformat(args.executed_at) if args.executed_at else None,
+            )
+            print(json.dumps(asdict(receipt), indent=2, sort_keys=True))
+        elif args.command == "post-close":
+            store = Store(args.database)
+            receipt = PaperExecutionEngine(store).post_close(
+                args.agent, date.fromisoformat(args.date),
+                {key.upper(): float(value) for key, value in json.loads(args.marks).items()},
+                datetime.fromisoformat(args.available_at),
+            )
+            print(json.dumps(asdict(receipt), indent=2, sort_keys=True))
+        elif args.command == "wallet-status":
+            store = Store(args.database)
+            wallet_state = PaperExecutionEngine(store).load_wallet(args.agent)
+            marks = {key.upper(): float(value) for key, value in json.loads(args.marks).items()}
+            payload = {"agent_id": args.agent, "cash": wallet_state.cash, "positions": wallet_state.quantities}
+            if set(wallet_state.quantities).issubset(marks):
+                payload["equity"] = wallet_state.equity(marks)
+            print(json.dumps(payload, indent=2, sort_keys=True))
         else:
             connection = sqlite3.connect(args.database)
             rows = connection.execute(
@@ -236,7 +283,7 @@ def main() -> None:
             ).fetchall()
             for agent, equity, cash, day in rows:
                 print(f"{agent:14} equity=${equity:.4f} cash=${cash:.4f} as_of={day}")
-    except EvidenceFetchError as error:
+    except (EvidenceFetchError, ExecutionRejected, WalletAlreadyExists) as error:
         raise SystemExit(str(error)) from error
 
 
