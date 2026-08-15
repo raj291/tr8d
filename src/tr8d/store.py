@@ -73,13 +73,33 @@ CREATE TABLE IF NOT EXISTS decision_runs (
   decision_time TEXT NOT NULL, snapshot_hash TEXT NOT NULL, provider_name TEXT NOT NULL,
   proposal_action TEXT NOT NULL, proposal_json TEXT NOT NULL, risk_json TEXT NOT NULL,
   approved INTEGER NOT NULL, fallback_used INTEGER NOT NULL,
-  gate_reason TEXT NOT NULL, created_at TEXT NOT NULL
+  gate_reason TEXT NOT NULL, created_at TEXT NOT NULL, context_json TEXT NOT NULL DEFAULT '{}'
 );
 CREATE TABLE IF NOT EXISTS tool_calls (
   id INTEGER PRIMARY KEY AUTOINCREMENT, decision_id TEXT NOT NULL, sequence INTEGER NOT NULL,
   tool_name TEXT NOT NULL, called_at TEXT NOT NULL, arguments_hash TEXT NOT NULL,
   result_count INTEGER NOT NULL, success INTEGER NOT NULL,
   UNIQUE(decision_id, sequence), FOREIGN KEY (decision_id) REFERENCES decision_runs(decision_id)
+);
+CREATE TABLE IF NOT EXISTS live_wallets (
+  agent_id TEXT PRIMARY KEY, cash REAL NOT NULL, initial_cash REAL NOT NULL,
+  version INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS live_positions (
+  agent_id TEXT NOT NULL, symbol TEXT NOT NULL, quantity REAL NOT NULL,
+  PRIMARY KEY (agent_id, symbol), FOREIGN KEY (agent_id) REFERENCES live_wallets(agent_id)
+);
+CREATE TABLE IF NOT EXISTS paper_executions (
+  decision_id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, symbol TEXT NOT NULL,
+  trading_date TEXT NOT NULL, action TEXT NOT NULL, approved_notional REAL NOT NULL,
+  fill_price REAL NOT NULL, quantity REAL NOT NULL, executed_at TEXT NOT NULL,
+  wallet_version INTEGER NOT NULL, FOREIGN KEY (decision_id) REFERENCES decision_runs(decision_id),
+  FOREIGN KEY (agent_id) REFERENCES live_wallets(agent_id)
+);
+CREATE TABLE IF NOT EXISTS live_portfolio_snapshots (
+  agent_id TEXT NOT NULL, trading_date TEXT NOT NULL, available_at TEXT NOT NULL,
+  cash REAL NOT NULL, equity REAL NOT NULL, positions_json TEXT NOT NULL, marks_json TEXT NOT NULL,
+  PRIMARY KEY (agent_id, trading_date), FOREIGN KEY (agent_id) REFERENCES live_wallets(agent_id)
 );
 """
 
@@ -90,6 +110,10 @@ class Store:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.connection = sqlite3.connect(path)
         self.connection.executescript(SCHEMA)
+        columns = {row[1] for row in self.connection.execute("PRAGMA table_info(decision_runs)")}
+        if "context_json" not in columns:
+            self.connection.execute("ALTER TABLE decision_runs ADD COLUMN context_json TEXT NOT NULL DEFAULT '{}'")
+            self.connection.commit()
 
     def start_run(self, run_id: str, started_at: str, seed: int, source: str) -> None:
         self.connection.execute("INSERT INTO runs VALUES (?, ?, ?, ?)", (run_id, started_at, seed, source))
@@ -195,18 +219,37 @@ class Store:
         ) for row in rows]
 
     def decision_outcome(self, outcome: DecisionOutcome) -> None:
+        proposal_json = json.dumps(asdict(outcome.proposal), sort_keys=True)
+        existing = self.connection.execute(
+            "SELECT snapshot_hash, proposal_json, approved FROM decision_runs WHERE decision_id = ?",
+            (outcome.context.decision_id,),
+        ).fetchone()
+        if existing:
+            expected = (outcome.context.snapshot_hash, proposal_json, int(outcome.approved))
+            if existing != expected:
+                raise ValueError("immutable decision record conflicts with existing decision ID")
+            return
         self.connection.execute(
-            """INSERT OR REPLACE INTO decision_runs
+            """INSERT INTO decision_runs
             (decision_id, agent_id, symbol, decision_time, snapshot_hash, provider_name,
-             proposal_action, proposal_json, risk_json, approved, fallback_used, gate_reason, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+             proposal_action, proposal_json, risk_json, approved, fallback_used, gate_reason, created_at,
+             context_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 outcome.context.decision_id, outcome.context.agent_id, outcome.context.symbol,
                 outcome.context.decision_time.isoformat(), outcome.context.snapshot_hash,
                 outcome.context.provider_name, outcome.proposal.action,
-                json.dumps(asdict(outcome.proposal), sort_keys=True),
+                proposal_json,
                 json.dumps(asdict(outcome.risk), sort_keys=True), int(outcome.approved),
                 int(outcome.fallback_used), outcome.gate_reason, datetime.now(UTC).isoformat(),
+                json.dumps({
+                    "marks": outcome.context.marks,
+                    "prediction": asdict(outcome.context.prediction),
+                    "wallet": asdict(outcome.context.wallet),
+                    "evidence_ids": [result.chunk.id for result in outcome.context.evidence],
+                    "memory_ids": [memory.id for memory in outcome.context.memories],
+                    "data_quality": outcome.context.data_quality,
+                    "estimated_friction_bps": outcome.context.estimated_friction_bps,
+                }, sort_keys=True),
             ),
         )
         self.connection.execute("DELETE FROM tool_calls WHERE decision_id = ?", (outcome.context.decision_id,))

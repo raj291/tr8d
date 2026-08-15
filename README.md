@@ -136,6 +136,28 @@ Every run stores its snapshot hash, structured proposal, gate result, risk
 result, and ordered tool trace. Invalid provider output is converted to HOLD;
 the provider never mutates wallets or invokes the execution simulator.
 
+## Transactional paper execution
+
+Persistent wallets cannot be silently reset. Approved proposals are risk-checked
+again against the latest wallet, executed once using an idempotent decision ID,
+and committed with wallet and position changes in one SQLite transaction.
+
+```bash
+python3 -m tr8d init-wallet --agent pattern --cash 10 --database var/tr8d.db
+python3 -m tr8d execute-approved --decision-id dec-example --open-price 225.75 \
+  --executed-at 2026-08-14T13:30:00+00:00 --database var/tr8d.db
+python3 -m tr8d post-close --agent pattern --date 2026-08-14 \
+  --available-at 2026-08-14T20:00:00+00:00 --marks '{"AAPL": 228.10}' \
+  --database var/tr8d.db
+python3 -m tr8d wallet-status --agent pattern --marks '{"AAPL": 228.10}' \
+  --database var/tr8d.db
+```
+
+Post-close processing writes an immutable portfolio snapshot and one episodic
+memory per completed execution. Those memories become available only at the
+provided close timestamp. This remains a dummy-money simulator with no broker
+adapter or real order-routing capability.
+
 To replay a real CSV:
 
 ```bash
