@@ -101,6 +101,11 @@ CREATE TABLE IF NOT EXISTS live_portfolio_snapshots (
   cash REAL NOT NULL, equity REAL NOT NULL, positions_json TEXT NOT NULL, marks_json TEXT NOT NULL,
   PRIMARY KEY (agent_id, trading_date), FOREIGN KEY (agent_id) REFERENCES live_wallets(agent_id)
 );
+CREATE TABLE IF NOT EXISTS workflow_runs (
+  id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, trading_date TEXT NOT NULL,
+  provider_name TEXT NOT NULL, status TEXT NOT NULL, started_at TEXT NOT NULL,
+  completed_at TEXT, decision_id TEXT, report_json TEXT, error_type TEXT, error_message TEXT
+);
 """
 
 
@@ -249,6 +254,8 @@ class Store:
                     "memory_ids": [memory.id for memory in outcome.context.memories],
                     "data_quality": outcome.context.data_quality,
                     "estimated_friction_bps": outcome.context.estimated_friction_bps,
+                    "data_reference": outcome.context.data_reference,
+                    "provider_metadata": outcome.provider_metadata,
                 }, sort_keys=True),
             ),
         )

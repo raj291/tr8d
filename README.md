@@ -1,8 +1,9 @@
 # TR8D paper-trading research lab
 
-TR8D is the first executable slice of the paper-trading agent design. It is a
-research simulator—not a broker, financial adviser, or real-money trading
-system.
+TR8D is an executable paper-trading learning-agent research lab. It connects
+point-in-time data, evidence retrieval, structured decisions, deterministic
+risk controls, transactional paper execution, and post-close memory. It is not
+a broker, financial adviser, or real-money trading system.
 
 The current MVP deliberately focuses on the foundations that must be correct
 before news, RAG, or an LLM is allowed to influence a trade:
@@ -16,14 +17,32 @@ before news, RAG, or an LLM is allowed to influence a trade:
 - reproducible demo data and automated invariant tests.
 - versioned data manifests and baseline-relative performance reports.
 
-## Run it
+## Install and run the complete demo
 
-Python 3.11+ and NumPy are required.
+Python 3.11+ is required. The default demo is deterministic, uses synthetic
+data, needs no API key, and makes no network request.
 
 ```bash
-python3 -m tr8d demo --database var/tr8d.db --days 800
-python3 -m tr8d inspect --database var/tr8d.db
-python3 -m unittest discover -s tests -v
+python3 -m venv .venv
+.venv/bin/python -m pip install -e '.[dev]'
+.venv/bin/python -m tr8d agent-demo
+.venv/bin/python -m unittest discover -s tests -v
+```
+
+`agent-demo` runs the full lifecycle in one command: it stores a versioned
+synthetic price fixture, indexes synthetic evidence, initializes a $10 paper
+wallet, creates and gates a structured decision, executes an approved fill at
+the stored session open, values the wallet at the stored close, creates a
+temporally safe episodic memory, and returns a JSON audit report. Use
+`--database var/agent-demo.db` to retain its SQLite audit trail. Repeating the
+same completed workflow returns the original immutable report rather than
+placing another fill.
+
+The historical backtest remains available:
+
+```bash
+.venv/bin/python -m tr8d demo --database var/tr8d.db --days 800
+.venv/bin/python -m tr8d inspect --database var/tr8d.db
 ```
 
 The demo creates deterministic synthetic daily data for `XLK`, `XLE`, and
@@ -136,6 +155,24 @@ Every run stores its snapshot hash, structured proposal, gate result, risk
 result, and ordered tool trace. Invalid provider output is converted to HOLD;
 the provider never mutates wallets or invokes the execution simulator.
 
+### Optional Laya provider
+
+Laya is supported as an opt-in advisory classifier and is never execution
+authority. Install the pinned beta package explicitly:
+
+```bash
+.venv/bin/python -m pip install laya==0.3.20
+# equivalent project extra:
+.venv/bin/python -m pip install -e '.[agent]'
+.venv/bin/python -m tr8d agent-demo --provider laya
+```
+
+The first Laya inference may download a large Hugging Face checkpoint. The
+offline deterministic provider therefore remains the default. Laya output is
+converted into the same exact proposal schema and still passes through the
+temporal evidence gate, risk governor, transactional simulator, and close
+lock. It has not been validated as a finance model.
+
 ## Transactional paper execution
 
 Persistent wallets cannot be silently reset. Approved proposals are risk-checked
@@ -180,11 +217,15 @@ The package has no brokerage adapter, credentials, order-routing endpoint, or
 arbitrary network/SQL tool. The predictor proposes a paper action; the risk
 governor can reject it; only the simulator can mutate wallet state.
 
-## Next milestones
+## Data and production boundaries
 
-1. Replace synthetic/CSV-only ingestion with versioned Stooq imports.
-2. Add PostgreSQL and immutable data manifests.
-3. Add XGBoost and calibration once its walk-forward report beats the baseline.
-4. Add SEC/GDELT ingestion and the post-close large-move explainer.
-5. Add pgvector memory/RAG, then a structured-output LLM behind the same risk
-   boundary.
+TR8D does not consume real-time market data. It uses synthetic daily bars,
+downloaded/versioned Stooq CSVs, SEC submission metadata, and recent GDELT
+metadata. The integrated demo is deliberately synthetic and labels its
+evidence accordingly.
+
+The research workflow is complete enough to run and audit end to end, but
+production deployment would still require licensed live data, exchange-aware
+calendars, stronger append-only storage, monitoring, secrets management,
+provider evaluation, and independent compliance/security review. No brokerage
+adapter or order-routing endpoint is included.

@@ -6,6 +6,11 @@ from tr8d.simulator import PaperSimulator
 
 
 class RiskAndSimulatorTests(unittest.TestCase):
+    def test_equity_requires_marks_for_every_holding(self):
+        wallet = Wallet(5.0, {"AAPL": 0.02, "MSFT": 0.01})
+        with self.assertRaisesRegex(ValueError, "MSFT"):
+            wallet.equity({"AAPL": 100.0})
+
     def test_buy_cannot_create_negative_cash(self):
         wallet = Wallet(10.0, {})
         proposal = Proposal("XLK", Action.BUY, 12.0, 0.8, "test")

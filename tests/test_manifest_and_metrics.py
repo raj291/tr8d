@@ -6,6 +6,7 @@ from pathlib import Path
 from tr8d.data import load_stooq_csv, synthetic_prices, validate_price_panel
 from tr8d.manifest import create_manifest
 from tr8d.metrics import performance
+from tr8d.replay import replay
 
 
 class ManifestAndMetricsTests(unittest.TestCase):
@@ -38,6 +39,15 @@ class ManifestAndMetricsTests(unittest.TestCase):
         bars = synthetic_prices(120)
         with self.assertRaisesRegex(ValueError, "aligned"):
             validate_price_panel(bars[:-1])
+
+    def test_replay_can_repeat_same_dataset_in_one_database(self):
+        bars = synthetic_prices(120)
+        with tempfile.TemporaryDirectory() as directory:
+            database = str(Path(directory) / "replay.db")
+            manifests = str(Path(directory) / "manifests")
+            first = replay(bars, database, "synthetic", manifest_directory=manifests)
+            second = replay(bars, database, "synthetic", manifest_directory=manifests)
+            self.assertNotEqual(first["run_id"], second["run_id"])
 
 
 if __name__ == "__main__":

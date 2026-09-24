@@ -3,8 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import asdict, dataclass, replace
+from dataclasses import field as dataclass_field
 from datetime import UTC, datetime
-from typing import Literal, Protocol
+from importlib.metadata import PackageNotFoundError, version
+from typing import Any, ClassVar, Literal, Protocol
 
 from .domain import Action, Prediction, Proposal, RiskDecision, Wallet
 from .memory import AgentMemory, rank_memories
@@ -36,6 +38,7 @@ class DecisionContext:
     estimated_friction_bps: float
     snapshot_hash: str
     provider_name: str
+    data_reference: dict[str, str]
 
 
 @dataclass(frozen=True)
@@ -60,6 +63,7 @@ class DecisionOutcome:
     gate_reason: str
     tool_traces: tuple[ToolTrace, ...]
     fallback_used: bool
+    provider_metadata: dict[str, Any] = dataclass_field(default_factory=dict)
 
 
 class DecisionProvider(Protocol):
@@ -151,6 +155,83 @@ class DeterministicDecisionProvider:
         }
 
 
+class LayaDecisionProvider:
+    """Optional advisory adapter; deterministic gates retain final authority."""
+
+    name = "laya-v1"
+    _schema: ClassVar[dict[str, Any]] = {
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": ["A", "B", "C"],
+                "description": "Choose A for BUY, B for SELL, or C for HOLD.",
+            },
+        },
+    }
+
+    def __init__(self, runner: Any, confidence_threshold: float = 0.60, model_id: str = "auto"):
+        if not 0 <= confidence_threshold <= 1:
+            raise ValueError("Laya confidence threshold must be between 0 and 1")
+        self.runner = runner
+        self.confidence_threshold = confidence_threshold
+        self.model_id = model_id
+        try:
+            package_version = version("laya")
+        except PackageNotFoundError:
+            package_version = "not-installed"
+        self.audit_metadata: dict[str, Any] = {
+            "package_version": package_version,
+            "model_id": model_id,
+            "confidence_threshold": confidence_threshold,
+        }
+
+    def structured_response(self, context: DecisionContext) -> dict:
+        state = {
+            "instruction": "Choose a conservative paper-trading action; C is the safe default.",
+            "symbol": context.symbol,
+            "bull_probability": context.prediction.bull_probability,
+            "expected_return": context.prediction.expected_return,
+            "cash": context.wallet.cash,
+            "held_quantity": context.wallet.quantities.get(context.symbol, 0.0),
+            "evidence": [
+                {
+                    "text": result.chunk.text,
+                    "sentiment": result.chunk.sentiment_label,
+                    "available_at": result.chunk.available_at.isoformat(),
+                }
+                for result in context.evidence[:3]
+            ],
+        }
+        result = self.runner.decide(state, schema=self._schema, return_details=True)
+        label = result.values.get("action", "C")
+        confidence = float(result.confidence.get("action", 0.0))
+        labels = {"A": "BUY", "B": "SELL", "C": "HOLD"}
+        if label not in labels:
+            raise ValueError("Laya returned an unsupported action label")
+        action = labels[label]
+        if confidence < self.confidence_threshold or not context.evidence:
+            action = "HOLD"
+        direction = {"BUY": "BULL", "SELL": "BEAR", "HOLD": "FLAT"}[action]
+        self.audit_metadata = {
+            **self.audit_metadata,
+            "confidence": confidence,
+            "probabilities": result.probabilities.get("action", {}),
+            "routing": result.routing,
+        }
+        return {
+            "symbol": context.symbol,
+            "action": action,
+            "notional": 0.0 if action == "HOLD" else 2.0,
+            "confidence": confidence,
+            "thesis": ("Laya selected a bounded action from point-in-time context.",),
+            "counter_thesis": ("The advisory classifier is not validated as a price model.",),
+            "evidence_ids": tuple(result.chunk.id for result in context.evidence[:3]) if action != "HOLD" else (),
+            "expected_direction": direction,
+            "invalidation_conditions": ("New contradictory evidence or a risk-limit breach occurs.",),
+        }
+
+
 def validate_proposal(payload: dict, expected_symbol: str) -> StructuredProposal:
     required = {
         "symbol", "action", "notional", "confidence", "thesis", "counter_thesis",
@@ -205,7 +286,7 @@ def orchestrate_decision(
     agent_id: str, symbol: str, decision_time: datetime, prediction: Prediction, wallet: Wallet,
     marks: dict[str, float], chunks: list[DocumentChunk], memories: list[AgentMemory],
     provider: DecisionProvider | None = None, data_quality: float = 1.0,
-    estimated_friction_bps: float = 10.0,
+    estimated_friction_bps: float = 10.0, data_reference: dict[str, str] | None = None,
 ) -> DecisionOutcome:
     if decision_time.tzinfo is None:
         raise ValueError("decision_time must be timezone-aware")
@@ -218,8 +299,14 @@ def orchestrate_decision(
         raise ValueError("estimated friction cannot be negative")
     if wallet.cash < 0:
         raise ValueError("wallet cash cannot be negative")
+    held_symbols = {held for held, quantity in wallet.quantities.items() if quantity > 0}
+    missing_marks = held_symbols - set(marks)
+    invalid_marks = {held for held in held_symbols if held in marks and marks[held] <= 0}
+    if missing_marks or invalid_marks:
+        raise ValueError(f"positive marks required for all holdings: {sorted(missing_marks | invalid_marks)}")
     if symbol not in marks or marks[symbol] <= 0:
         raise ValueError("a positive completed-data mark is required for the symbol")
+    data_reference = dict(data_reference or {})
     tools = DecisionTools(chunks, memories, wallet, prediction, marks)
     wallet_snapshot = tools.get_wallet()
     model_prediction = tools.get_price_model_prediction(symbol, decision_time)
@@ -232,6 +319,7 @@ def orchestrate_decision(
         "evidence_ids": [result.chunk.id for result in evidence],
         "memory_ids": [memory.id for memory in recalled], "data_quality": data_quality,
         "estimated_friction_bps": estimated_friction_bps, "provider_name": provider.name,
+        "data_reference": data_reference,
     }
     snapshot_hash = _hash_payload(snapshot_payload)
     context = DecisionContext(
@@ -239,20 +327,34 @@ def orchestrate_decision(
         decision_time=decision_time, prediction=model_prediction, wallet=wallet_snapshot,
         marks=dict(marks), evidence=evidence, memories=recalled, data_quality=data_quality,
         estimated_friction_bps=estimated_friction_bps, snapshot_hash=snapshot_hash,
-        provider_name=provider.name,
+        provider_name=provider.name, data_reference=data_reference,
     )
     fallback_used = False
     try:
         proposal = validate_proposal(provider.structured_response(context), symbol)
-    except (TypeError, ValueError, KeyError, RuntimeError, TimeoutError):
+        tools._trace("structured_decision_provider", {"provider": provider.name}, 1)
+    except Exception as error:  # noqa: BLE001 - untrusted provider failures must fail closed
+        tools._trace(
+            "structured_decision_provider",
+            {"provider": provider.name, "error_type": type(error).__name__},
+            0,
+            success=False,
+        )
         fallback_used = True
         proposal = validate_proposal(DeterministicDecisionProvider().structured_response(
             replace(context, evidence=(), memories=())
         ), symbol)
     gate_allowed, gate_reason = decision_gate(context, proposal)
+    provider_metadata = dict(getattr(provider, "audit_metadata", {}))
     if not gate_allowed or proposal.action == "HOLD":
         outcome_reason = gate_reason if not gate_allowed else "hold proposal"
         risk = RiskDecision(False, outcome_reason)
-        return DecisionOutcome(context, proposal, risk, False, outcome_reason, tuple(tools.traces), fallback_used)
+        return DecisionOutcome(
+            context, proposal, risk, False, outcome_reason, tuple(tools.traces),
+            fallback_used, provider_metadata,
+        )
     risk = tools.get_risk_assessment(proposal)
-    return DecisionOutcome(context, proposal, risk, risk.allowed, gate_reason, tuple(tools.traces), fallback_used)
+    return DecisionOutcome(
+        context, proposal, risk, risk.allowed, gate_reason, tuple(tools.traces),
+        fallback_used, provider_metadata,
+    )

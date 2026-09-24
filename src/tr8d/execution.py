@@ -111,6 +111,15 @@ class PaperExecutionEngine:
             parsed_decision_time = datetime.fromisoformat(decision_time)
             if executed_at < parsed_decision_time:
                 raise ExecutionRejected("execution cannot precede the decision")
+            trading_date = parsed_decision_time.date().isoformat()
+            if executed_at.date() != parsed_decision_time.date():
+                raise ExecutionRejected("execution must occur in the decision's trading session")
+            closed = connection.execute(
+                "SELECT 1 FROM live_portfolio_snapshots WHERE agent_id = ? AND trading_date = ?",
+                (agent_id, trading_date),
+            ).fetchone()
+            if closed:
+                raise ExecutionRejected("trading session is already closed")
             if not approved:
                 raise ExecutionRejected("decision was not approved")
             proposal_data, original_risk, context = json.loads(proposal_json), json.loads(risk_json), json.loads(context_json)
@@ -148,7 +157,6 @@ class PaperExecutionEngine:
                         ON CONFLICT(agent_id, symbol) DO UPDATE SET quantity = excluded.quantity""",
                         (agent_id, position_symbol, position_quantity),
                     )
-            trading_date = parsed_decision_time.date().isoformat()
             connection.execute(
                 "INSERT INTO paper_executions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
@@ -176,21 +184,23 @@ class PaperExecutionEngine:
         connection.execute("BEGIN IMMEDIATE")
         try:
             existing = connection.execute(
-                """SELECT cash, equity, marks_json FROM live_portfolio_snapshots
+                """SELECT cash, equity, marks_json, available_at FROM live_portfolio_snapshots
                 WHERE agent_id = ? AND trading_date = ?""",
                 (agent_id, trading_date.isoformat()),
             ).fetchone()
             if existing:
-                if json.loads(existing[2]) != marks:
-                    raise ExecutionRejected("post-close snapshot already exists with different marks")
+                if json.loads(existing[2]) != marks or datetime.fromisoformat(existing[3]) != available_at:
+                    raise ExecutionRejected("post-close snapshot already exists with different close data")
                 connection.commit()
                 return PostCloseReceipt(agent_id, trading_date.isoformat(), existing[0], existing[1], 0, True)
             wallet = self.load_wallet(agent_id)
             executions = connection.execute(
-                """SELECT decision_id, symbol, action, fill_price FROM paper_executions
+                """SELECT decision_id, symbol, action, fill_price, executed_at FROM paper_executions
                 WHERE agent_id = ? AND trading_date = ?""",
                 (agent_id, trading_date.isoformat()),
             ).fetchall()
+            if any(datetime.fromisoformat(row[4]) >= available_at for row in executions):
+                raise ExecutionRejected("post-close availability must follow all executions")
             required_symbols = set(wallet.quantities) | {row[1] for row in executions}
             missing = required_symbols - set(marks)
             if missing or any(value <= 0 for value in marks.values()):
@@ -204,7 +214,7 @@ class PaperExecutionEngine:
                 ),
             )
             memories: list[AgentMemory] = []
-            for decision_id, symbol, action, fill_price in executions:
+            for decision_id, symbol, action, fill_price, _ in executions:
                 close_price = marks[symbol]
                 signed_return = close_price / fill_price - 1 if action == "BUY" else fill_price / close_price - 1
                 text = (

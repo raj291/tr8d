@@ -2,8 +2,9 @@ import tempfile
 import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
-from tr8d.decision import orchestrate_decision, validate_proposal
+from tr8d.decision import LayaDecisionProvider, orchestrate_decision, validate_proposal
 from tr8d.documents import Document
 from tr8d.domain import Prediction, Wallet
 from tr8d.retrieval import chunk_document
@@ -42,8 +43,49 @@ class DecisionTests(unittest.TestCase):
         self.assertEqual(outcome.risk.approved_notional, 2.0)
         self.assertEqual(
             [trace.name for trace in outcome.tool_traces],
-            ["get_wallet", "get_price_model_prediction", "search_evidence", "search_agent_memory", "get_risk_assessment"],
+            [
+                "get_wallet", "get_price_model_prediction", "search_evidence",
+                "search_agent_memory", "structured_decision_provider", "get_risk_assessment",
+            ],
         )
+
+    def test_laya_adapter_is_advisory_and_offline_testable(self):
+        class FakeRunner:
+            def decide(self, state, schema, return_details):
+                self.state = state
+                return SimpleNamespace(
+                    values={"action": "A"}, confidence={"action": 0.82},
+                    probabilities={"action": {"A": 0.82, "B": 0.05, "C": 0.13}},
+                    routing={"model": "fake"},
+                )
+
+        decision_time = datetime(2026, 8, 14, 13, 20, tzinfo=UTC)
+        _, chunk = evidence_chunk(decision_time - timedelta(hours=1))
+        provider = LayaDecisionProvider(FakeRunner(), model_id="fake")
+        outcome = orchestrate_decision(
+            "pattern", "AAPL", decision_time, Prediction(0.7, 0.005),
+            Wallet(10.0, {}), {"AAPL": 100.0}, [chunk], [], provider,
+        )
+        self.assertTrue(outcome.approved)
+        self.assertEqual(outcome.proposal.action, "BUY")
+        self.assertEqual(outcome.provider_metadata["routing"], {"model": "fake"})
+
+    def test_laya_low_confidence_fails_closed(self):
+        class FakeRunner:
+            def decide(self, state, schema, return_details):
+                return SimpleNamespace(
+                    values={"action": "A"}, confidence={"action": 0.55},
+                    probabilities={"action": {}}, routing=None,
+                )
+
+        decision_time = datetime(2026, 8, 14, 13, 20, tzinfo=UTC)
+        _, chunk = evidence_chunk(decision_time - timedelta(hours=1))
+        outcome = orchestrate_decision(
+            "pattern", "AAPL", decision_time, Prediction(0.7, 0.005),
+            Wallet(10.0, {}), {"AAPL": 100.0}, [chunk], [], LayaDecisionProvider(FakeRunner()),
+        )
+        self.assertEqual(outcome.proposal.action, "HOLD")
+        self.assertFalse(outcome.approved)
 
     def test_future_evidence_produces_hold(self):
         decision_time = datetime(2026, 8, 14, 13, 20, tzinfo=UTC)

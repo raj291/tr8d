@@ -93,6 +93,28 @@ class ExecutionTests(unittest.TestCase):
             )
         self.assertEqual(self.engine.load_wallet("pattern"), Wallet(10.0, {}))
 
+    def test_execution_cannot_move_to_another_session(self):
+        outcome = self.save_decision()
+        self.engine.initialize_wallet("pattern", 10.0)
+        with self.assertRaisesRegex(ExecutionRejected, "trading session"):
+            self.engine.execute_decision(
+                outcome.context.decision_id, 101.0,
+                datetime(2026, 8, 15, 13, 30, tzinfo=UTC),
+            )
+
+    def test_closed_session_rejects_late_execution(self):
+        outcome = self.save_decision()
+        self.engine.initialize_wallet("pattern", 10.0)
+        self.engine.post_close(
+            "pattern", date(2026, 8, 14), {"AAPL": 103.0},
+            datetime(2026, 8, 14, 20, 0, tzinfo=UTC),
+        )
+        with self.assertRaisesRegex(ExecutionRejected, "already closed"):
+            self.engine.execute_decision(
+                outcome.context.decision_id, 101.0,
+                datetime(2026, 8, 14, 13, 30, tzinfo=UTC),
+            )
+
     def test_unapproved_decision_cannot_execute(self):
         decision_time = datetime(2026, 8, 14, 13, 20, tzinfo=UTC)
         outcome = orchestrate_decision(
@@ -103,7 +125,10 @@ class ExecutionTests(unittest.TestCase):
         self.store.commit()
         self.engine.initialize_wallet("pattern", 10.0)
         with self.assertRaisesRegex(ExecutionRejected, "not approved"):
-            self.engine.execute_decision(outcome.context.decision_id, 101.0)
+            self.engine.execute_decision(
+                outcome.context.decision_id, 101.0,
+                datetime(2026, 8, 14, 13, 30, tzinfo=UTC),
+            )
 
     def test_decision_record_is_idempotent(self):
         outcome = self.save_decision()
@@ -125,6 +150,11 @@ class ExecutionTests(unittest.TestCase):
         replay = self.engine.post_close("pattern", date(2026, 8, 14), {"AAPL": 103.0}, available_at)
         self.assertTrue(replay.idempotent_replay)
         self.assertEqual(len(self.store.load_memories()), 1)
+        with self.assertRaisesRegex(ExecutionRejected, "different close data"):
+            self.engine.post_close(
+                "pattern", date(2026, 8, 14), {"AAPL": 103.0},
+                available_at + timedelta(minutes=1),
+            )
 
 
 if __name__ == "__main__":

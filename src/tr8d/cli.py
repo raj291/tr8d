@@ -7,7 +7,7 @@ from dataclasses import asdict
 from datetime import date, datetime
 
 from .data import load_price_csv, load_stooq_csv, synthetic_prices, write_normalized_csv
-from .decision import orchestrate_decision
+from .decision import LayaDecisionProvider, orchestrate_decision
 from .documents import (
     EvidenceClient,
     EvidenceFetchError,
@@ -23,6 +23,7 @@ from .memory import create_memory, rank_memories
 from .replay import replay
 from .retrieval import chunk_document, rank_chunks
 from .store import Store
+from .workflow import WorkflowAlreadyExists, run_agent_demo
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -33,6 +34,12 @@ def _parser() -> argparse.ArgumentParser:
     demo.add_argument("--days", type=int, default=800)
     demo.add_argument("--seed", type=int, default=7)
     demo.add_argument("--manifest-directory", default="data/manifests")
+    agent_demo = sub.add_parser("agent-demo", help="run the complete paper-agent lifecycle")
+    agent_demo.add_argument("--database", default=":memory:")
+    agent_demo.add_argument("--agent", default="pattern-demo")
+    agent_demo.add_argument("--provider", choices=("deterministic", "laya"), default="deterministic")
+    agent_demo.add_argument("--laya-model", default="auto")
+    agent_demo.add_argument("--laya-device")
     real = sub.add_parser("replay", help="replay an OHLC CSV")
     real.add_argument("csv")
     real.add_argument("--database", default="var/tr8d.db")
@@ -129,7 +136,19 @@ def _parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = _parser().parse_args()
     try:
-        if args.command == "demo":
+        if args.command == "agent-demo":
+            provider = None
+            if args.provider == "laya":
+                try:
+                    from laya import Router
+                except ImportError as error:
+                    raise SystemExit("Laya is not installed; run: python -m pip install laya==0.3.20") from error
+                models = None if args.laya_model == "auto" else {"english": args.laya_model}
+                provider = LayaDecisionProvider(
+                    Router(models=models, device=args.laya_device), model_id=args.laya_model,
+                )
+            print(json.dumps(run_agent_demo(args.database, args.agent, provider), indent=2, sort_keys=True))
+        elif args.command == "demo":
             result = replay(synthetic_prices(args.days, args.seed), args.database, "synthetic", args.seed, manifest_directory=args.manifest_directory)
             print(json.dumps(result, indent=2, sort_keys=True))
         elif args.command == "replay":
@@ -283,7 +302,7 @@ def main() -> None:
             ).fetchall()
             for agent, equity, cash, day in rows:
                 print(f"{agent:14} equity=${equity:.4f} cash=${cash:.4f} as_of={day}")
-    except (EvidenceFetchError, ExecutionRejected, WalletAlreadyExists) as error:
+    except (EvidenceFetchError, ExecutionRejected, WalletAlreadyExists, WorkflowAlreadyExists) as error:
         raise SystemExit(str(error)) from error
 
 

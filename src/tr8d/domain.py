@@ -59,7 +59,14 @@ class Wallet:
     quantities: dict[str, float]
 
     def equity(self, marks: dict[str, float]) -> float:
-        return self.cash + sum(qty * marks.get(symbol, 0.0) for symbol, qty in self.quantities.items())
+        held_symbols = {symbol for symbol, quantity in self.quantities.items() if quantity > 0}
+        missing = held_symbols - set(marks)
+        if missing:
+            raise ValueError(f"positive marks required for all holdings: {sorted(missing)}")
+        invalid = sorted(symbol for symbol in held_symbols if marks[symbol] <= 0)
+        if invalid:
+            raise ValueError(f"positive marks required for all holdings: {invalid}")
+        return self.cash + sum(qty * marks[symbol] for symbol, qty in self.quantities.items() if qty > 0)
 
 
 @dataclass(frozen=True)
