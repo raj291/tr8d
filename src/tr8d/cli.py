@@ -4,10 +4,16 @@ import argparse
 import json
 import sqlite3
 from dataclasses import asdict
-from datetime import datetime
+from datetime import date, datetime
+from pathlib import Path
 
 from .data import load_price_csv, load_stooq_csv, synthetic_prices, write_normalized_csv
-from .decision import orchestrate_decision
+from .decision import (
+    DecisionProviderUnavailable,
+    DeterministicDecisionProvider,
+    load_laya_provider,
+    orchestrate_decision,
+)
 from .documents import (
     EvidenceClient,
     EvidenceFetchError,
@@ -16,12 +22,23 @@ from .documents import (
 )
 from .domain import Prediction, Wallet
 from .evaluation import evaluate_models, write_model_report
+from .execution import ExecutionRejected, PaperExecutionEngine, WalletAlreadyExists
 from .explain import explain_large_move, write_explanation
+from .laya_training import (
+    build_laya_examples,
+    evaluate_laya_checkpoint,
+    train_laya_head,
+    write_laya_dataset,
+)
 from .manifest import create_manifest
+from .market_data import MarketDataError, create_provider
+from .market_service import serve
 from .memory import create_memory, rank_memories
 from .replay import replay
 from .retrieval import chunk_document, rank_chunks
 from .store import Store
+from .teacher import export_pending_reviews
+from .workflow import WorkflowAlreadyExists, run_agent_demo
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -32,6 +49,16 @@ def _parser() -> argparse.ArgumentParser:
     demo.add_argument("--days", type=int, default=800)
     demo.add_argument("--seed", type=int, default=7)
     demo.add_argument("--manifest-directory", default="data/manifests")
+    agent_demo = sub.add_parser("agent-demo", help="run the complete paper-agent lifecycle")
+    agent_demo.add_argument("--database", default=":memory:")
+    agent_demo.add_argument("--agent", default="pattern-demo")
+    agent_demo.add_argument(
+        "--provider", choices=("laya", "deterministic"), default="laya",
+        help="decision provider (default: laya)",
+    )
+    agent_demo.add_argument("--laya-model", default="auto")
+    agent_demo.add_argument("--laya-device")
+    agent_demo.add_argument("--laya-confidence-threshold", type=float)
     real = sub.add_parser("replay", help="replay an OHLC CSV")
     real.add_argument("csv")
     real.add_argument("--database", default="var/tr8d.db")
@@ -45,6 +72,49 @@ def _parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--demo-days", type=int, default=320)
     evaluate.add_argument("--seed", type=int, default=7)
     evaluate.add_argument("--output", default="var/model-evaluation.json")
+    export_training = sub.add_parser(
+        "export-laya-dataset", help="build leakage-safe temporal Laya training splits",
+    )
+    export_training.add_argument(
+        "csv", nargs="?", help="normalized price CSV; omit to use the synthetic dataset",
+    )
+    export_training.add_argument("--demo-days", type=int, default=240)
+    export_training.add_argument("--seed", type=int, default=7)
+    export_training.add_argument("--threshold", type=float, default=0.0025)
+    export_training.add_argument(
+        "--prediction-source",
+        choices=("expanding_logistic", "feature_heuristic"),
+        default="expanding_logistic",
+    )
+    export_training.add_argument("--output", default="var/laya-training")
+    train_laya = sub.add_parser(
+        "train-laya", help="adapt Laya's decision head on temporal price labels",
+    )
+    train_laya.add_argument("--dataset", default="var/laya-training")
+    train_laya.add_argument("--output", default="var/models/laya-tr8d")
+    train_laya.add_argument("--base-model", default="convaiinnovations/laya")
+    train_laya.add_argument("--device", default="cpu")
+    train_laya.add_argument("--epochs", type=int, default=1)
+    train_laya.add_argument("--batch-size", type=int, default=8)
+    train_laya.add_argument("--learning-rate", type=float, default=1e-4)
+    train_laya.add_argument("--max-train-examples", type=int, default=0)
+    train_laya.add_argument("--seed", type=int, default=7)
+    train_laya.add_argument("--target-accuracy", type=float, default=0.85)
+    train_laya.add_argument("--minimum-coverage", type=float, default=0.10)
+    train_laya.add_argument("--minimum-test-examples", type=int, default=500)
+    train_laya.add_argument("--patience", type=int, default=2)
+    evaluate_laya = sub.add_parser(
+        "evaluate-laya", help="audit Laya with an untouched-test promotion gate",
+    )
+    evaluate_laya.add_argument("--dataset", default="var/laya-training")
+    evaluate_laya.add_argument("--model", default="var/models/laya-tr8d")
+    evaluate_laya.add_argument("--device", default="cpu")
+    evaluate_laya.add_argument("--batch-size", type=int, default=8)
+    evaluate_laya.add_argument("--target-accuracy", type=float, default=0.85)
+    evaluate_laya.add_argument("--minimum-coverage", type=float, default=0.10)
+    evaluate_laya.add_argument("--minimum-test-examples", type=int, default=500)
+    evaluate_laya.add_argument("--write-policy", action="store_true")
+    evaluate_laya.add_argument("--output", default="var/laya-quality-report.json")
     sec = sub.add_parser("fetch-sec", help="fetch SEC submissions with point-in-time timestamps")
     sec.add_argument("--cik", required=True)
     sec.add_argument("--symbol", required=True)
@@ -100,16 +170,64 @@ def _parser() -> argparse.ArgumentParser:
     synthesize.add_argument("--positions", default="{}", help="JSON symbol-to-quantity mapping")
     synthesize.add_argument("--marks", required=True, help="JSON symbol-to-price mapping from completed data")
     synthesize.add_argument("--data-quality", type=float, default=1.0)
+    synthesize.add_argument(
+        "--provider", choices=("laya", "deterministic"), default="laya",
+        help="decision provider (default: laya)",
+    )
+    synthesize.add_argument("--laya-model", default="auto")
+    synthesize.add_argument("--laya-device")
+    synthesize.add_argument("--laya-confidence-threshold", type=float)
     synthesize.add_argument("--database", default="var/tr8d.db")
+    initialize = sub.add_parser("init-wallet", help="initialize a persistent paper wallet once")
+    initialize.add_argument("--agent", required=True)
+    initialize.add_argument("--cash", type=float, default=10.0)
+    initialize.add_argument("--database", default="var/tr8d.db")
+    execute = sub.add_parser("execute-approved", help="atomically execute an approved paper decision")
+    execute.add_argument("--decision-id", required=True)
+    execute.add_argument("--open-price", type=float, required=True)
+    execute.add_argument("--executed-at", help="timezone-aware ISO timestamp; defaults to now")
+    execute.add_argument("--database", default="var/tr8d.db")
+    close = sub.add_parser("post-close", help="mark a paper wallet and create outcome memories")
+    close.add_argument("--agent", required=True)
+    close.add_argument("--date", required=True)
+    close.add_argument("--available-at", required=True)
+    close.add_argument("--marks", required=True, help="JSON symbol-to-close-price mapping")
+    close.add_argument("--database", default="var/tr8d.db")
+    wallet = sub.add_parser("wallet-status", help="show persistent paper wallet state")
+    wallet.add_argument("--agent", required=True)
+    wallet.add_argument("--marks", default="{}", help="optional JSON marks for equity")
+    wallet.add_argument("--database", default="var/tr8d.db")
+    review_status = sub.add_parser(
+        "llm-review-status", help="show asynchronous LLM teacher queue status",
+    )
+    review_status.add_argument("--database", default="var/tr8d.db")
+    export_reviews = sub.add_parser(
+        "export-llm-reviews", help="export pending jobs for a background LLM worker",
+    )
+    export_reviews.add_argument("--database", default="var/tr8d.db")
+    export_reviews.add_argument("--output", default="var/llm-review-jobs.jsonl")
+    export_reviews.add_argument("--limit", type=int, default=1000)
     inspect = sub.add_parser("inspect", help="show latest run results")
     inspect.add_argument("--database", default="var/tr8d.db")
+    dashboard = sub.add_parser("market-dashboard", help="serve the read-only market-data dashboard")
+    dashboard.add_argument("--provider", choices=("alpaca", "demo", "nyse"), default="demo")
+    dashboard.add_argument("--host", default="127.0.0.1")
+    dashboard.add_argument("--port", type=int, default=8765)
     return parser
 
 
 def main() -> None:
     args = _parser().parse_args()
     try:
-        if args.command == "demo":
+        if args.command == "agent-demo":
+            provider = (
+                load_laya_provider(
+                    args.laya_model, args.laya_device, args.laya_confidence_threshold,
+                )
+                if args.provider == "laya" else DeterministicDecisionProvider()
+            )
+            print(json.dumps(run_agent_demo(args.database, args.agent, provider), indent=2, sort_keys=True))
+        elif args.command == "demo":
             result = replay(synthetic_prices(args.days, args.seed), args.database, "synthetic", args.seed, manifest_directory=args.manifest_directory)
             print(json.dumps(result, indent=2, sort_keys=True))
         elif args.command == "replay":
@@ -131,6 +249,50 @@ def main() -> None:
             report = evaluate_models(bars, seed=args.seed)
             report_path = write_model_report(report, bars, source, args.output)
             print(json.dumps({"report": str(report_path), **report}, indent=2, sort_keys=True))
+        elif args.command == "export-laya-dataset":
+            bars = load_price_csv(args.csv) if args.csv else synthetic_prices(args.demo_days, args.seed)
+            source = args.csv or "synthetic"
+            examples = build_laya_examples(
+                bars, args.threshold, prediction_source=args.prediction_source,
+            )
+            manifest = write_laya_dataset(
+                examples, args.output, source=source, synthetic=args.csv is None,
+            )
+            print(json.dumps({"output": args.output, **manifest}, indent=2, sort_keys=True))
+        elif args.command == "train-laya":
+            report = train_laya_head(
+                dataset_directory=args.dataset,
+                output_directory=args.output,
+                base_model=args.base_model,
+                device=args.device,
+                epochs=args.epochs,
+                batch_size=args.batch_size,
+                learning_rate=args.learning_rate,
+                max_train_examples=args.max_train_examples,
+                seed=args.seed,
+                target_accuracy=args.target_accuracy,
+                minimum_coverage=args.minimum_coverage,
+                minimum_test_examples=args.minimum_test_examples,
+                patience=args.patience,
+            )
+            print(json.dumps(report, indent=2, sort_keys=True))
+        elif args.command == "evaluate-laya":
+            report = evaluate_laya_checkpoint(
+                dataset_directory=args.dataset,
+                model=args.model,
+                device=args.device,
+                batch_size=args.batch_size,
+                target_accuracy=args.target_accuracy,
+                minimum_coverage=args.minimum_coverage,
+                minimum_test_examples=args.minimum_test_examples,
+                write_policy=args.write_policy,
+            )
+            output = Path(args.output)
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(
+                json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8",
+            )
+            print(json.dumps({"output": str(output), **report}, indent=2, sort_keys=True))
         elif args.command == "fetch-sec":
             documents = EvidenceClient(args.user_agent).sec_submissions(args.cik, args.symbol)
             path = write_documents(documents, args.output)
@@ -211,6 +373,12 @@ def main() -> None:
                 wallet=Wallet(args.cash, {key.upper(): float(value) for key, value in json.loads(args.positions).items()}),
                 marks={key.upper(): float(value) for key, value in json.loads(args.marks).items()},
                 chunks=store.load_chunks(), memories=store.load_memories(),
+                provider=(
+                    load_laya_provider(
+                        args.laya_model, args.laya_device, args.laya_confidence_threshold,
+                    )
+                    if args.provider == "laya" else DeterministicDecisionProvider()
+                ),
                 data_quality=args.data_quality,
             )
             store.decision_outcome(outcome)
@@ -223,9 +391,49 @@ def main() -> None:
                 "approved": outcome.approved,
                 "gate_reason": outcome.gate_reason,
                 "provider": outcome.context.provider_name,
+                "provider_metadata": outcome.provider_metadata,
                 "fallback_used": outcome.fallback_used,
                 "tools": [trace.name for trace in outcome.tool_traces],
             }, indent=2, sort_keys=True))
+        elif args.command == "init-wallet":
+            store = Store(args.database)
+            wallet_state = PaperExecutionEngine(store).initialize_wallet(args.agent, args.cash)
+            print(json.dumps({"agent_id": args.agent, "cash": wallet_state.cash, "positions": {}}, indent=2))
+        elif args.command == "execute-approved":
+            store = Store(args.database)
+            receipt = PaperExecutionEngine(store).execute_decision(
+                args.decision_id, args.open_price,
+                datetime.fromisoformat(args.executed_at) if args.executed_at else None,
+            )
+            print(json.dumps(asdict(receipt), indent=2, sort_keys=True))
+        elif args.command == "post-close":
+            store = Store(args.database)
+            receipt = PaperExecutionEngine(store).post_close(
+                args.agent, date.fromisoformat(args.date),
+                {key.upper(): float(value) for key, value in json.loads(args.marks).items()},
+                datetime.fromisoformat(args.available_at),
+            )
+            print(json.dumps(asdict(receipt), indent=2, sort_keys=True))
+        elif args.command == "wallet-status":
+            store = Store(args.database)
+            wallet_state = PaperExecutionEngine(store).load_wallet(args.agent)
+            marks = {key.upper(): float(value) for key, value in json.loads(args.marks).items()}
+            payload = {"agent_id": args.agent, "cash": wallet_state.cash, "positions": wallet_state.quantities}
+            if set(wallet_state.quantities).issubset(marks):
+                payload["equity"] = wallet_state.equity(marks)
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        elif args.command == "llm-review-status":
+            store = Store(args.database)
+            print(json.dumps(store.llm_review_counts(), indent=2, sort_keys=True))
+            store.close()
+        elif args.command == "export-llm-reviews":
+            store = Store(args.database)
+            output = export_pending_reviews(store, args.output, args.limit)
+            count = len(output.read_text(encoding="utf-8").splitlines())
+            store.close()
+            print(json.dumps({"output": str(output), "jobs": count}, indent=2))
+        elif args.command == "market-dashboard":
+            serve(create_provider(args.provider), args.host, args.port)
         else:
             connection = sqlite3.connect(args.database)
             rows = connection.execute(
@@ -236,7 +444,10 @@ def main() -> None:
             ).fetchall()
             for agent, equity, cash, day in rows:
                 print(f"{agent:14} equity=${equity:.4f} cash=${cash:.4f} as_of={day}")
-    except EvidenceFetchError as error:
+    except (
+        DecisionProviderUnavailable, EvidenceFetchError, ExecutionRejected,
+        MarketDataError, WalletAlreadyExists, WorkflowAlreadyExists,
+    ) as error:
         raise SystemExit(str(error)) from error
 
 

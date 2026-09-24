@@ -50,8 +50,13 @@ def replay(
         raise ValueError(f"each symbol requires at least {warmup + 1} rows")
     manifest = create_manifest(bars, source)
     manifest_path = manifest.write(manifest_directory)
-    run_id = f"run-{manifest.content_sha256[:12]}-{seed}"
     store = Store(database)
+    base_run_id = f"run-{manifest.content_sha256[:12]}-{seed}"
+    run_id = base_run_id
+    attempt = 2
+    while store.connection.execute("SELECT 1 FROM runs WHERE id = ?", (run_id,)).fetchone():
+        run_id = f"{base_run_id}-{attempt}"
+        attempt += 1
     store.start_run(run_id, datetime.now(UTC).isoformat(), seed, source)
     store.manifest(run_id, manifest.version, manifest.content_sha256, str(manifest_path), json.dumps(manifest.__dict__, sort_keys=True))
     store.prices(run_id, bars)

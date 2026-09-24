@@ -1,8 +1,9 @@
 # TR8D paper-trading research lab
 
-TR8D is the first executable slice of the paper-trading agent design. It is a
-research simulator—not a broker, financial adviser, or real-money trading
-system.
+TR8D is an executable paper-trading learning-agent research lab. It connects
+point-in-time data, evidence retrieval, structured decisions, deterministic
+risk controls, transactional paper execution, and post-close memory. It is not
+a broker, financial adviser, or real-money trading system.
 
 The current MVP deliberately focuses on the foundations that must be correct
 before news, RAG, or an LLM is allowed to influence a trade:
@@ -16,14 +17,34 @@ before news, RAG, or an LLM is allowed to influence a trade:
 - reproducible demo data and automated invariant tests.
 - versioned data manifests and baseline-relative performance reports.
 
-## Run it
+## Install and run the complete demo
 
-Python 3.11+ and NumPy are required.
+Python 3.11+ is required. The demo uses synthetic market data and needs no API
+key. Laya is the default decision maker; its first run downloads its model
+checkpoint, after which inference can use the local cache.
 
 ```bash
-python3 -m tr8d demo --database var/tr8d.db --days 800
-python3 -m tr8d inspect --database var/tr8d.db
-python3 -m unittest discover -s tests -v
+python3 -m venv .venv
+.venv/bin/python -m pip install -e '.[agent,dev]'
+.venv/bin/python -m tr8d agent-demo
+.venv/bin/python -m unittest discover -s tests -v
+```
+
+`agent-demo` runs the full lifecycle in one command: it stores a versioned
+synthetic price fixture, indexes synthetic evidence, initializes a $10 paper
+wallet, creates and gates a structured decision, executes an approved fill at
+the stored session open only when Laya's proposal clears every gate, values the
+wallet at the stored close, creates any resulting temporally safe episodic
+memory, and returns a JSON audit report. Use
+`--database var/agent-demo.db` to retain its SQLite audit trail. Repeating the
+same completed workflow returns the original immutable report rather than
+placing another fill.
+
+The historical backtest remains available:
+
+```bash
+.venv/bin/python -m tr8d demo --database var/tr8d.db --days 800
+.venv/bin/python -m tr8d inspect --database var/tr8d.db
 ```
 
 The demo creates deterministic synthetic daily data for `XLK`, `XLE`, and
@@ -31,6 +52,39 @@ The demo creates deterministic synthetic daily data for `XLK`, `XLE`, and
 strategy an independent $10 wallet. Its JSON report includes return, maximum
 drawdown, annualized volatility, turnover, trade count, and cash/buy-and-hold/
 equal-weight comparisons.
+
+## Read-only US market-data dashboard
+
+TR8D now includes a dependency-free market-data microservice and dashboard.
+Run the complete UI immediately with deterministic, clearly labeled synthetic
+data:
+
+```bash
+.venv/bin/python -m tr8d market-dashboard --provider demo
+# open http://127.0.0.1:8765
+```
+
+For current US equities data, create free Alpaca API credentials and run:
+
+```bash
+export ALPACA_API_KEY_ID='your-key-id'
+export ALPACA_API_SECRET_KEY='your-secret-key'
+export ALPACA_DATA_FEED='iex'
+.venv/bin/python -m tr8d market-dashboard --provider alpaca
+```
+
+The JSON API exposes `GET /api/market/status`, `GET /api/quotes?symbols=AAPL,MSFT`,
+and `GET /api/history/AAPL?days=90&timeframe=1Day`. Symbols are allowlisted and
+normalized, quote requests are cached briefly, provider errors are returned as
+safe JSON, and credentials never reach the browser. The default free Alpaca
+feed is real-time IEX only—not the consolidated US SIP tape. Set `sip` only when
+the account has the required paid data entitlement.
+
+NYSE TOP is the Trade Operations Portal, not a free retail real-time price
+feed. TR8D therefore rejects `--provider nyse` with a precise configuration
+message instead of inventing an integration or silently presenting another
+source as NYSE data. A future licensed NYSE/SIP adapter can implement the same
+read-only provider contract without changing the dashboard.
 
 ## Ingest downloaded Stooq data
 
@@ -118,10 +172,10 @@ trade from being promoted into durable strategy knowledge.
 ## Structured decision synthesis
 
 The decision layer builds an immutable snapshot from an allowlisted tool set,
-asks a provider for an exact schema, validates every citation and timestamp,
-and sends non-HOLD proposals to the deterministic risk governor. The included
-provider is deliberately rule-based and fail-closed; a local or API LLM must
-implement the same interface and pass the same gates before it can replace it.
+asks Laya for a bounded BUY/SELL/HOLD choice, validates every citation and
+timestamp, and sends non-HOLD proposals to the deterministic risk governor.
+Laya is advisory: it cannot mutate the wallet, approve its own notional, or
+bypass the execution safeguards.
 
 ```bash
 python3 -m tr8d synthesize-decision \
@@ -135,6 +189,106 @@ python3 -m tr8d synthesize-decision \
 Every run stores its snapshot hash, structured proposal, gate result, risk
 result, and ordered tool trace. Invalid provider output is converted to HOLD;
 the provider never mutates wallets or invokes the execution simulator.
+
+### Laya decision provider
+
+Laya is the default advisory decision maker and is never execution authority.
+Install the pinned beta package explicitly or through the project extra:
+
+```bash
+.venv/bin/python -m pip install laya==0.3.20
+# equivalent project extra:
+.venv/bin/python -m pip install -e '.[agent]'
+.venv/bin/python -m tr8d agent-demo
+```
+
+The first Laya inference may download a large Hugging Face checkpoint. The
+deterministic provider remains available only as an explicit offline fallback
+with `--provider deterministic`. Laya output is converted into the same exact
+proposal schema and still passes through the temporal evidence gate, risk
+governor, transactional simulator, and close lock. If Laya fails or returns a
+low-confidence answer, the decision fails closed to HOLD. It has not been
+validated as a finance model.
+
+## Train Laya while the LLM stays in the background
+
+TR8D can adapt Laya's decision head to the price history already available to
+the project. The exporter creates chronological train, calibration, and
+untouched test splits. Each example uses only bars completed before its
+decision date; its BUY/SELL/HOLD target is derived later from that session's
+open-to-close return. Use a normalized CSV to train on downloaded data, or omit
+the CSV for the reproducible synthetic panel:
+
+```bash
+.venv/bin/python -m tr8d export-laya-dataset data/processed/stooq_prices.csv \
+  --output var/laya-training
+.venv/bin/python -m tr8d train-laya \
+  --dataset var/laya-training --output var/models/laya-tr8d --device cpu
+.venv/bin/python -m tr8d agent-demo --laya-model var/models/laya-tr8d
+```
+
+The local trainer freezes Laya's encoder and updates only its typed decision
+head, scorer, and type embedding. This makes one-epoch domain adaptation
+feasible on CPU and produces a directly loadable Laya checkpoint. It is
+deliberately described as supervised head-only adaptation, not as the full GPU
+RLCD procedure. The report includes accuracy, balanced accuracy, macro F1,
+per-class precision/recall, confusion matrix, Brier score, log loss,
+calibration, and selective accuracy/coverage. Its confidence threshold is fit
+on calibration data and frozen before the untouched test is read. Promotion
+requires at least 85% selective accuracy at 10% coverage, 500 untouched test
+examples, performance above the majority baseline, and improved Brier score.
+Promotion is reported, never performed automatically.
+
+The initial synthetic checkpoint fails this stronger gate and is not promoted;
+see `reports/laya-quality-report.json`. Its local policy threshold is 1.0, so it
+fails closed to HOLD and background LLM review. The 807 MB checkpoint remains
+in ignored local `var/models/laya-tr8d` rather than being committed to Git.
+
+For a larger GPU run, open `notebooks/TR8D_Laya_Colab.ipynb`. The exporter also
+writes `train_rlcd.jsonl`, `calibration_rlcd.jsonl`, and `test_rlcd.jsonl` for
+the data shape used by Laya's official full-RLCD notebook. The complete data,
+evaluation, and promotion protocol is in `docs/LAYA_ROBUSTNESS.md`.
+
+When Laya's calibrated answer probability is below its checkpoint policy
+threshold (0.60 for an unconfigured base model), the current
+decision fails closed to HOLD and creates an immutable `PENDING` LLM review
+job. Laya provider errors trigger the same escalation. Confident Laya and
+deterministic-provider decisions do not create unnecessary jobs. No LLM is
+called in the trading process: a separate worker consumes uncertain cases
+through the `LLMTeacherProvider` interface, leaving Laya and the deterministic
+risk gates fully available when the LLM is slow or offline.
+
+```bash
+.venv/bin/python -m tr8d llm-review-status --database var/agent-demo.db
+.venv/bin/python -m tr8d export-llm-reviews --database var/agent-demo.db \
+  --output var/llm-review-jobs.jsonl
+```
+
+LLM reviews remain auditable auxiliary labels. They are not allowed to place a
+trade or silently enter training; reviewed labels can be admitted only by a
+future explicit dataset-quality step.
+
+## Transactional paper execution
+
+Persistent wallets cannot be silently reset. Approved proposals are risk-checked
+again against the latest wallet, executed once using an idempotent decision ID,
+and committed with wallet and position changes in one SQLite transaction.
+
+```bash
+python3 -m tr8d init-wallet --agent pattern --cash 10 --database var/tr8d.db
+python3 -m tr8d execute-approved --decision-id dec-example --open-price 225.75 \
+  --executed-at 2026-08-14T13:30:00+00:00 --database var/tr8d.db
+python3 -m tr8d post-close --agent pattern --date 2026-08-14 \
+  --available-at 2026-08-14T20:00:00+00:00 --marks '{"AAPL": 228.10}' \
+  --database var/tr8d.db
+python3 -m tr8d wallet-status --agent pattern --marks '{"AAPL": 228.10}' \
+  --database var/tr8d.db
+```
+
+Post-close processing writes an immutable portfolio snapshot and one episodic
+memory per completed execution. Those memories become available only at the
+provided close timestamp. This remains a dummy-money simulator with no broker
+adapter or real order-routing capability.
 
 To replay a real CSV:
 
@@ -158,11 +312,16 @@ The package has no brokerage adapter, credentials, order-routing endpoint, or
 arbitrary network/SQL tool. The predictor proposes a paper action; the risk
 governor can reject it; only the simulator can mutate wallet state.
 
-## Next milestones
+## Data and production boundaries
 
-1. Replace synthetic/CSV-only ingestion with versioned Stooq imports.
-2. Add PostgreSQL and immutable data manifests.
-3. Add XGBoost and calibration once its walk-forward report beats the baseline.
-4. Add SEC/GDELT ingestion and the post-close large-move explainer.
-5. Add pgvector memory/RAG, then a structured-output LLM behind the same risk
-   boundary.
+TR8D can now consume read-only current and historical data through its isolated
+market-data service. Free live mode covers IEX only; it does not represent the
+consolidated US market. Research replays continue to use immutable synthetic or
+downloaded/versioned bars, while SEC and GDELT supply evidence metadata. Every
+demo and market-data response identifies its source and coverage.
+
+The research workflow is complete enough to run and audit end to end, but
+production deployment would still require licensed consolidated data, exchange-aware
+calendars, stronger append-only storage, monitoring, secrets management,
+provider evaluation, and independent compliance/security review. No brokerage
+adapter or order-routing endpoint is included.

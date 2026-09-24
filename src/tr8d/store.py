@@ -73,13 +73,44 @@ CREATE TABLE IF NOT EXISTS decision_runs (
   decision_time TEXT NOT NULL, snapshot_hash TEXT NOT NULL, provider_name TEXT NOT NULL,
   proposal_action TEXT NOT NULL, proposal_json TEXT NOT NULL, risk_json TEXT NOT NULL,
   approved INTEGER NOT NULL, fallback_used INTEGER NOT NULL,
-  gate_reason TEXT NOT NULL, created_at TEXT NOT NULL
+  gate_reason TEXT NOT NULL, created_at TEXT NOT NULL, context_json TEXT NOT NULL DEFAULT '{}'
 );
 CREATE TABLE IF NOT EXISTS tool_calls (
   id INTEGER PRIMARY KEY AUTOINCREMENT, decision_id TEXT NOT NULL, sequence INTEGER NOT NULL,
   tool_name TEXT NOT NULL, called_at TEXT NOT NULL, arguments_hash TEXT NOT NULL,
   result_count INTEGER NOT NULL, success INTEGER NOT NULL,
   UNIQUE(decision_id, sequence), FOREIGN KEY (decision_id) REFERENCES decision_runs(decision_id)
+);
+CREATE TABLE IF NOT EXISTS live_wallets (
+  agent_id TEXT PRIMARY KEY, cash REAL NOT NULL, initial_cash REAL NOT NULL,
+  version INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS live_positions (
+  agent_id TEXT NOT NULL, symbol TEXT NOT NULL, quantity REAL NOT NULL,
+  PRIMARY KEY (agent_id, symbol), FOREIGN KEY (agent_id) REFERENCES live_wallets(agent_id)
+);
+CREATE TABLE IF NOT EXISTS paper_executions (
+  decision_id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, symbol TEXT NOT NULL,
+  trading_date TEXT NOT NULL, action TEXT NOT NULL, approved_notional REAL NOT NULL,
+  fill_price REAL NOT NULL, quantity REAL NOT NULL, executed_at TEXT NOT NULL,
+  wallet_version INTEGER NOT NULL, FOREIGN KEY (decision_id) REFERENCES decision_runs(decision_id),
+  FOREIGN KEY (agent_id) REFERENCES live_wallets(agent_id)
+);
+CREATE TABLE IF NOT EXISTS live_portfolio_snapshots (
+  agent_id TEXT NOT NULL, trading_date TEXT NOT NULL, available_at TEXT NOT NULL,
+  cash REAL NOT NULL, equity REAL NOT NULL, positions_json TEXT NOT NULL, marks_json TEXT NOT NULL,
+  PRIMARY KEY (agent_id, trading_date), FOREIGN KEY (agent_id) REFERENCES live_wallets(agent_id)
+);
+CREATE TABLE IF NOT EXISTS workflow_runs (
+  id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, trading_date TEXT NOT NULL,
+  provider_name TEXT NOT NULL, status TEXT NOT NULL, started_at TEXT NOT NULL,
+  completed_at TEXT, decision_id TEXT, report_json TEXT, error_type TEXT, error_message TEXT
+);
+CREATE TABLE IF NOT EXISTS llm_review_jobs (
+  decision_id TEXT PRIMARY KEY, status TEXT NOT NULL, request_json TEXT NOT NULL,
+  response_json TEXT, provider_name TEXT, created_at TEXT NOT NULL,
+  completed_at TEXT, error_type TEXT, error_message TEXT,
+  FOREIGN KEY (decision_id) REFERENCES decision_runs(decision_id)
 );
 """
 
@@ -90,6 +121,10 @@ class Store:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.connection = sqlite3.connect(path)
         self.connection.executescript(SCHEMA)
+        columns = {row[1] for row in self.connection.execute("PRAGMA table_info(decision_runs)")}
+        if "context_json" not in columns:
+            self.connection.execute("ALTER TABLE decision_runs ADD COLUMN context_json TEXT NOT NULL DEFAULT '{}'")
+            self.connection.commit()
 
     def start_run(self, run_id: str, started_at: str, seed: int, source: str) -> None:
         self.connection.execute("INSERT INTO runs VALUES (?, ?, ?, ?)", (run_id, started_at, seed, source))
@@ -195,18 +230,40 @@ class Store:
         ) for row in rows]
 
     def decision_outcome(self, outcome: DecisionOutcome) -> None:
+        proposal_json = json.dumps(asdict(outcome.proposal), sort_keys=True)
+        existing = self.connection.execute(
+            "SELECT snapshot_hash, proposal_json, approved FROM decision_runs WHERE decision_id = ?",
+            (outcome.context.decision_id,),
+        ).fetchone()
+        if existing:
+            expected = (outcome.context.snapshot_hash, proposal_json, int(outcome.approved))
+            if existing != expected:
+                raise ValueError("immutable decision record conflicts with existing decision ID")
+            self._enqueue_llm_review(outcome)
+            return
         self.connection.execute(
-            """INSERT OR REPLACE INTO decision_runs
+            """INSERT INTO decision_runs
             (decision_id, agent_id, symbol, decision_time, snapshot_hash, provider_name,
-             proposal_action, proposal_json, risk_json, approved, fallback_used, gate_reason, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+             proposal_action, proposal_json, risk_json, approved, fallback_used, gate_reason, created_at,
+             context_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 outcome.context.decision_id, outcome.context.agent_id, outcome.context.symbol,
                 outcome.context.decision_time.isoformat(), outcome.context.snapshot_hash,
                 outcome.context.provider_name, outcome.proposal.action,
-                json.dumps(asdict(outcome.proposal), sort_keys=True),
+                proposal_json,
                 json.dumps(asdict(outcome.risk), sort_keys=True), int(outcome.approved),
                 int(outcome.fallback_used), outcome.gate_reason, datetime.now(UTC).isoformat(),
+                json.dumps({
+                    "marks": outcome.context.marks,
+                    "prediction": asdict(outcome.context.prediction),
+                    "wallet": asdict(outcome.context.wallet),
+                    "evidence_ids": [result.chunk.id for result in outcome.context.evidence],
+                    "memory_ids": [memory.id for memory in outcome.context.memories],
+                    "data_quality": outcome.context.data_quality,
+                    "estimated_friction_bps": outcome.context.estimated_friction_bps,
+                    "data_reference": outcome.context.data_reference,
+                    "provider_metadata": outcome.provider_metadata,
+                }, sort_keys=True),
             ),
         )
         self.connection.execute("DELETE FROM tool_calls WHERE decision_id = ?", (outcome.context.decision_id,))
@@ -219,6 +276,99 @@ class Store:
                 trace.arguments_hash, trace.result_count, int(trace.success),
             ) for sequence, trace in enumerate(outcome.tool_traces)],
         )
+        self._enqueue_llm_review(outcome)
+
+    def _enqueue_llm_review(self, outcome: DecisionOutcome) -> None:
+        """Queue uncertain Laya context for a worker; never call an LLM here."""
+        if not outcome.provider_metadata.get("llm_escalation_required", False):
+            return
+        request = {
+            "decision_id": outcome.context.decision_id,
+            "agent_id": outcome.context.agent_id,
+            "symbol": outcome.context.symbol,
+            "decision_time": outcome.context.decision_time.isoformat(),
+            "snapshot_hash": outcome.context.snapshot_hash,
+            "provider_name": outcome.context.provider_name,
+            "escalation_reason": outcome.provider_metadata.get("llm_escalation_reason"),
+            "laya_confidence": outcome.provider_metadata.get("confidence"),
+            "laya_confidence_threshold": outcome.provider_metadata.get("confidence_threshold"),
+            "laya_probabilities": outcome.provider_metadata.get("probabilities", {}),
+            "prediction": asdict(outcome.context.prediction),
+            "wallet": asdict(outcome.context.wallet),
+            "marks": outcome.context.marks,
+            "evidence": [
+                {
+                    "chunk_id": result.chunk.id,
+                    "available_at": result.chunk.available_at.isoformat(),
+                    "text": result.chunk.text,
+                }
+                for result in outcome.context.evidence
+            ],
+            "proposal": asdict(outcome.proposal),
+            "risk": asdict(outcome.risk),
+            "approved": outcome.approved,
+            "gate_reason": outcome.gate_reason,
+        }
+        self.connection.execute(
+            """INSERT OR IGNORE INTO llm_review_jobs
+            (decision_id, status, request_json, response_json, provider_name, created_at,
+             completed_at, error_type, error_message)
+            VALUES (?, 'PENDING', ?, NULL, NULL, ?, NULL, NULL, NULL)""",
+            (
+                outcome.context.decision_id,
+                json.dumps(request, sort_keys=True),
+                datetime.now(UTC).isoformat(),
+            ),
+        )
+
+    def pending_llm_reviews(self, limit: int = 20) -> list[dict]:
+        if limit < 1:
+            raise ValueError("review limit must be positive")
+        rows = self.connection.execute(
+            """SELECT decision_id, request_json FROM llm_review_jobs
+            WHERE status = 'PENDING' ORDER BY created_at, decision_id LIMIT ?""",
+            (limit,),
+        ).fetchall()
+        return [
+            {"decision_id": decision_id, "request": json.loads(request_json)}
+            for decision_id, request_json in rows
+        ]
+
+    def complete_llm_review(
+        self, decision_id: str, provider_name: str, response: dict,
+    ) -> None:
+        cursor = self.connection.execute(
+            """UPDATE llm_review_jobs SET status = 'COMPLETED', response_json = ?,
+            provider_name = ?, completed_at = ?, error_type = NULL, error_message = NULL
+            WHERE decision_id = ? AND status = 'PENDING'""",
+            (
+                json.dumps(response, sort_keys=True), provider_name,
+                datetime.now(UTC).isoformat(), decision_id,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise ValueError(f"pending LLM review not found: {decision_id}")
+
+    def fail_llm_review(self, decision_id: str, provider_name: str, error: Exception) -> None:
+        cursor = self.connection.execute(
+            """UPDATE llm_review_jobs SET status = 'FAILED', provider_name = ?,
+            completed_at = ?, error_type = ?, error_message = ?
+            WHERE decision_id = ? AND status = 'PENDING'""",
+            (
+                provider_name, datetime.now(UTC).isoformat(), type(error).__name__,
+                str(error), decision_id,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise ValueError(f"pending LLM review not found: {decision_id}")
+
+    def llm_review_counts(self) -> dict[str, int]:
+        rows = self.connection.execute(
+            "SELECT status, COUNT(*) FROM llm_review_jobs GROUP BY status"
+        ).fetchall()
+        counts = {"PENDING": 0, "COMPLETED": 0, "FAILED": 0}
+        counts.update({status: int(count) for status, count in rows})
+        return counts
 
     def commit(self) -> None:
         self.connection.commit()

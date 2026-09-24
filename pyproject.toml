@@ -4,16 +4,21 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tr8d"
-version = "0.1.0"
+version = "0.5.0"
 description = "Point-in-time paper-trading research simulator"
 requires-python = ">=3.11"
 dependencies = ["numpy>=1.26"]
 
 [project.optional-dependencies]
 ml = ["scikit-learn>=1.8,<2", "xgboost>=3.4,<4"]
+agent = ["laya==0.3.20"]
+dev = ["ruff>=0.12,<1"]
 
 [project.scripts]
 tr8d = "tr8d.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+tr8d = ["dashboard/*.html", "dashboard/*.css", "dashboard/*.js"]
