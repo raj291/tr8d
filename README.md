@@ -206,10 +206,13 @@ The reproducible result from the checked-in phase is recorded in
 `reports/laya-training-report.json`; the 807 MB loadable checkpoint remains in
 ignored local `var/models/laya-tr8d` rather than being committed to Git.
 
-Every persisted decision also creates an immutable `PENDING` LLM review job.
-No LLM is called in the trading process: a separate worker can consume these
-jobs later through the `LLMTeacherProvider` interface, leaving Laya and the
-deterministic risk gates fully available when the LLM is slow or offline.
+When Laya's confidence is below its threshold (0.60 by default), the current
+decision fails closed to HOLD and creates an immutable `PENDING` LLM review
+job. Laya provider errors trigger the same escalation. Confident Laya and
+deterministic-provider decisions do not create unnecessary jobs. No LLM is
+called in the trading process: a separate worker consumes uncertain cases
+through the `LLMTeacherProvider` interface, leaving Laya and the deterministic
+risk gates fully available when the LLM is slow or offline.
 
 ```bash
 .venv/bin/python -m tr8d llm-review-status --database var/agent-demo.db

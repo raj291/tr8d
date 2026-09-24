@@ -98,6 +98,11 @@ class DecisionTests(unittest.TestCase):
         self.assertEqual(outcome.provider_metadata["selected_action"], "BUY")
         self.assertEqual(outcome.provider_metadata["effective_action"], "HOLD")
         self.assertEqual(outcome.provider_metadata["fail_closed_reason"], "confidence below threshold")
+        self.assertTrue(outcome.provider_metadata["llm_escalation_required"])
+        self.assertEqual(
+            outcome.provider_metadata["llm_escalation_reason"],
+            "laya confidence below threshold",
+        )
 
     def test_future_evidence_produces_hold(self):
         decision_time = datetime(2026, 8, 14, 13, 20, tzinfo=UTC)

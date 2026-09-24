@@ -199,6 +199,13 @@ def run_agent_demo(
                 "gate_reason": outcome.gate_reason,
                 "tool_trace": [trace.name for trace in outcome.tool_traces],
                 "data_reference": outcome.context.data_reference,
+                "llm_escalation": {
+                    "required": bool(
+                        outcome.provider_metadata.get("llm_escalation_required", False)
+                    ),
+                    "reason": outcome.provider_metadata.get("llm_escalation_reason"),
+                    "mode": "background",
+                },
             },
             "execution": asdict(execution) if execution else None,
             "post_close": asdict(close),

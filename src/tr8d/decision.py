@@ -233,6 +233,11 @@ class LayaDecisionProvider:
             "fail_closed_reason": fail_closed_reason,
             "probabilities": result.probabilities.get("action", {}),
             "routing": result.routing,
+            "llm_escalation_required": confidence < self.confidence_threshold,
+            "llm_escalation_reason": (
+                "laya confidence below threshold"
+                if confidence < self.confidence_threshold else None
+            ),
         }
         return {
             "symbol": context.symbol,
@@ -368,6 +373,7 @@ def orchestrate_decision(
         provider_name=provider.name, data_reference=data_reference,
     )
     fallback_used = False
+    provider_error_type = None
     try:
         proposal = validate_proposal(provider.structured_response(context), symbol)
         tools._trace("structured_decision_provider", {"provider": provider.name}, 1)
@@ -379,11 +385,20 @@ def orchestrate_decision(
             success=False,
         )
         fallback_used = True
+        provider_error_type = type(error).__name__
         proposal = validate_proposal(DeterministicDecisionProvider().structured_response(
             replace(context, evidence=(), memories=())
         ), symbol)
     gate_allowed, gate_reason = decision_gate(context, proposal)
     provider_metadata = dict(getattr(provider, "audit_metadata", {}))
+    if provider.name == LayaDecisionProvider.name and fallback_used:
+        provider_metadata.update({
+            "confidence": None,
+            "probabilities": {},
+            "llm_escalation_required": True,
+            "llm_escalation_reason": "laya provider error",
+            "llm_escalation_error_type": provider_error_type,
+        })
     if not gate_allowed or proposal.action == "HOLD":
         outcome_reason = gate_reason if not gate_allowed else "hold proposal"
         risk = RiskDecision(False, outcome_reason)

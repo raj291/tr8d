@@ -279,7 +279,9 @@ class Store:
         self._enqueue_llm_review(outcome)
 
     def _enqueue_llm_review(self, outcome: DecisionOutcome) -> None:
-        """Queue immutable context for an asynchronous teacher; never call an LLM here."""
+        """Queue uncertain Laya context for a worker; never call an LLM here."""
+        if not outcome.provider_metadata.get("llm_escalation_required", False):
+            return
         request = {
             "decision_id": outcome.context.decision_id,
             "agent_id": outcome.context.agent_id,
@@ -287,6 +289,10 @@ class Store:
             "decision_time": outcome.context.decision_time.isoformat(),
             "snapshot_hash": outcome.context.snapshot_hash,
             "provider_name": outcome.context.provider_name,
+            "escalation_reason": outcome.provider_metadata.get("llm_escalation_reason"),
+            "laya_confidence": outcome.provider_metadata.get("confidence"),
+            "laya_confidence_threshold": outcome.provider_metadata.get("confidence_threshold"),
+            "laya_probabilities": outcome.provider_metadata.get("probabilities", {}),
             "prediction": asdict(outcome.context.prediction),
             "wallet": asdict(outcome.context.wallet),
             "marks": outcome.context.marks,
