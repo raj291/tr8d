@@ -106,6 +106,12 @@ CREATE TABLE IF NOT EXISTS workflow_runs (
   provider_name TEXT NOT NULL, status TEXT NOT NULL, started_at TEXT NOT NULL,
   completed_at TEXT, decision_id TEXT, report_json TEXT, error_type TEXT, error_message TEXT
 );
+CREATE TABLE IF NOT EXISTS llm_review_jobs (
+  decision_id TEXT PRIMARY KEY, status TEXT NOT NULL, request_json TEXT NOT NULL,
+  response_json TEXT, provider_name TEXT, created_at TEXT NOT NULL,
+  completed_at TEXT, error_type TEXT, error_message TEXT,
+  FOREIGN KEY (decision_id) REFERENCES decision_runs(decision_id)
+);
 """
 
 
@@ -233,6 +239,7 @@ class Store:
             expected = (outcome.context.snapshot_hash, proposal_json, int(outcome.approved))
             if existing != expected:
                 raise ValueError("immutable decision record conflicts with existing decision ID")
+            self._enqueue_llm_review(outcome)
             return
         self.connection.execute(
             """INSERT INTO decision_runs
@@ -269,6 +276,93 @@ class Store:
                 trace.arguments_hash, trace.result_count, int(trace.success),
             ) for sequence, trace in enumerate(outcome.tool_traces)],
         )
+        self._enqueue_llm_review(outcome)
+
+    def _enqueue_llm_review(self, outcome: DecisionOutcome) -> None:
+        """Queue immutable context for an asynchronous teacher; never call an LLM here."""
+        request = {
+            "decision_id": outcome.context.decision_id,
+            "agent_id": outcome.context.agent_id,
+            "symbol": outcome.context.symbol,
+            "decision_time": outcome.context.decision_time.isoformat(),
+            "snapshot_hash": outcome.context.snapshot_hash,
+            "provider_name": outcome.context.provider_name,
+            "prediction": asdict(outcome.context.prediction),
+            "wallet": asdict(outcome.context.wallet),
+            "marks": outcome.context.marks,
+            "evidence": [
+                {
+                    "chunk_id": result.chunk.id,
+                    "available_at": result.chunk.available_at.isoformat(),
+                    "text": result.chunk.text,
+                }
+                for result in outcome.context.evidence
+            ],
+            "proposal": asdict(outcome.proposal),
+            "risk": asdict(outcome.risk),
+            "approved": outcome.approved,
+            "gate_reason": outcome.gate_reason,
+        }
+        self.connection.execute(
+            """INSERT OR IGNORE INTO llm_review_jobs
+            (decision_id, status, request_json, response_json, provider_name, created_at,
+             completed_at, error_type, error_message)
+            VALUES (?, 'PENDING', ?, NULL, NULL, ?, NULL, NULL, NULL)""",
+            (
+                outcome.context.decision_id,
+                json.dumps(request, sort_keys=True),
+                datetime.now(UTC).isoformat(),
+            ),
+        )
+
+    def pending_llm_reviews(self, limit: int = 20) -> list[dict]:
+        if limit < 1:
+            raise ValueError("review limit must be positive")
+        rows = self.connection.execute(
+            """SELECT decision_id, request_json FROM llm_review_jobs
+            WHERE status = 'PENDING' ORDER BY created_at, decision_id LIMIT ?""",
+            (limit,),
+        ).fetchall()
+        return [
+            {"decision_id": decision_id, "request": json.loads(request_json)}
+            for decision_id, request_json in rows
+        ]
+
+    def complete_llm_review(
+        self, decision_id: str, provider_name: str, response: dict,
+    ) -> None:
+        cursor = self.connection.execute(
+            """UPDATE llm_review_jobs SET status = 'COMPLETED', response_json = ?,
+            provider_name = ?, completed_at = ?, error_type = NULL, error_message = NULL
+            WHERE decision_id = ? AND status = 'PENDING'""",
+            (
+                json.dumps(response, sort_keys=True), provider_name,
+                datetime.now(UTC).isoformat(), decision_id,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise ValueError(f"pending LLM review not found: {decision_id}")
+
+    def fail_llm_review(self, decision_id: str, provider_name: str, error: Exception) -> None:
+        cursor = self.connection.execute(
+            """UPDATE llm_review_jobs SET status = 'FAILED', provider_name = ?,
+            completed_at = ?, error_type = ?, error_message = ?
+            WHERE decision_id = ? AND status = 'PENDING'""",
+            (
+                provider_name, datetime.now(UTC).isoformat(), type(error).__name__,
+                str(error), decision_id,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise ValueError(f"pending LLM review not found: {decision_id}")
+
+    def llm_review_counts(self) -> dict[str, int]:
+        rows = self.connection.execute(
+            "SELECT status, COUNT(*) FROM llm_review_jobs GROUP BY status"
+        ).fetchall()
+        counts = {"PENDING": 0, "COMPLETED": 0, "FAILED": 0}
+        counts.update({status: int(count) for status, count in rows})
+        return counts
 
     def commit(self) -> None:
         self.connection.commit()

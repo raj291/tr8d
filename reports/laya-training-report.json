@@ -1,0 +1,25 @@
+{
+  "after": {
+    "accuracy": 0.44871795177459717,
+    "brier": 0.6648784279823303,
+    "ece": 0.11029955744743347
+  },
+  "base_model": "convaiinnovations/laya",
+  "before": {
+    "accuracy": 0.43589743971824646,
+    "brier": 1.1275378465652466,
+    "ece": 0.5637052357196808
+  },
+  "calibration_examples": 75,
+  "dataset_digest": "e59733279778d411674dac5583ea03a556fef1a4d956138a98e81b23455ae1e6",
+  "dataset_source": "synthetic",
+  "device": "cpu",
+  "epochs": 1,
+  "mean_training_loss": 2.1759494450357226,
+  "method": "supervised_head_only",
+  "promoted": true,
+  "status": "completed",
+  "temperature": 1.006994366645813,
+  "test_examples": 78,
+  "train_examples": 354
+}

@@ -23,11 +23,13 @@ from .domain import Prediction, Wallet
 from .evaluation import evaluate_models, write_model_report
 from .execution import ExecutionRejected, PaperExecutionEngine, WalletAlreadyExists
 from .explain import explain_large_move, write_explanation
+from .laya_training import build_laya_examples, train_laya_head, write_laya_dataset
 from .manifest import create_manifest
 from .memory import create_memory, rank_memories
 from .replay import replay
 from .retrieval import chunk_document, rank_chunks
 from .store import Store
+from .teacher import export_pending_reviews
 from .workflow import WorkflowAlreadyExists, run_agent_demo
 
 
@@ -61,6 +63,28 @@ def _parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--demo-days", type=int, default=320)
     evaluate.add_argument("--seed", type=int, default=7)
     evaluate.add_argument("--output", default="var/model-evaluation.json")
+    export_training = sub.add_parser(
+        "export-laya-dataset", help="build leakage-safe temporal Laya training splits",
+    )
+    export_training.add_argument(
+        "csv", nargs="?", help="normalized price CSV; omit to use the synthetic dataset",
+    )
+    export_training.add_argument("--demo-days", type=int, default=240)
+    export_training.add_argument("--seed", type=int, default=7)
+    export_training.add_argument("--threshold", type=float, default=0.0025)
+    export_training.add_argument("--output", default="var/laya-training")
+    train_laya = sub.add_parser(
+        "train-laya", help="adapt Laya's decision head on temporal price labels",
+    )
+    train_laya.add_argument("--dataset", default="var/laya-training")
+    train_laya.add_argument("--output", default="var/models/laya-tr8d")
+    train_laya.add_argument("--base-model", default="convaiinnovations/laya")
+    train_laya.add_argument("--device", default="cpu")
+    train_laya.add_argument("--epochs", type=int, default=1)
+    train_laya.add_argument("--batch-size", type=int, default=8)
+    train_laya.add_argument("--learning-rate", type=float, default=1e-4)
+    train_laya.add_argument("--max-train-examples", type=int, default=0)
+    train_laya.add_argument("--seed", type=int, default=7)
     sec = sub.add_parser("fetch-sec", help="fetch SEC submissions with point-in-time timestamps")
     sec.add_argument("--cik", required=True)
     sec.add_argument("--symbol", required=True)
@@ -142,6 +166,16 @@ def _parser() -> argparse.ArgumentParser:
     wallet.add_argument("--agent", required=True)
     wallet.add_argument("--marks", default="{}", help="optional JSON marks for equity")
     wallet.add_argument("--database", default="var/tr8d.db")
+    review_status = sub.add_parser(
+        "llm-review-status", help="show asynchronous LLM teacher queue status",
+    )
+    review_status.add_argument("--database", default="var/tr8d.db")
+    export_reviews = sub.add_parser(
+        "export-llm-reviews", help="export pending jobs for a background LLM worker",
+    )
+    export_reviews.add_argument("--database", default="var/tr8d.db")
+    export_reviews.add_argument("--output", default="var/llm-review-jobs.jsonl")
+    export_reviews.add_argument("--limit", type=int, default=1000)
     inspect = sub.add_parser("inspect", help="show latest run results")
     inspect.add_argument("--database", default="var/tr8d.db")
     return parser
@@ -178,6 +212,27 @@ def main() -> None:
             report = evaluate_models(bars, seed=args.seed)
             report_path = write_model_report(report, bars, source, args.output)
             print(json.dumps({"report": str(report_path), **report}, indent=2, sort_keys=True))
+        elif args.command == "export-laya-dataset":
+            bars = load_price_csv(args.csv) if args.csv else synthetic_prices(args.demo_days, args.seed)
+            source = args.csv or "synthetic"
+            examples = build_laya_examples(bars, args.threshold)
+            manifest = write_laya_dataset(
+                examples, args.output, source=source, synthetic=args.csv is None,
+            )
+            print(json.dumps({"output": args.output, **manifest}, indent=2, sort_keys=True))
+        elif args.command == "train-laya":
+            report = train_laya_head(
+                dataset_directory=args.dataset,
+                output_directory=args.output,
+                base_model=args.base_model,
+                device=args.device,
+                epochs=args.epochs,
+                batch_size=args.batch_size,
+                learning_rate=args.learning_rate,
+                max_train_examples=args.max_train_examples,
+                seed=args.seed,
+            )
+            print(json.dumps(report, indent=2, sort_keys=True))
         elif args.command == "fetch-sec":
             documents = EvidenceClient(args.user_agent).sec_submissions(args.cik, args.symbol)
             path = write_documents(documents, args.output)
@@ -305,6 +360,16 @@ def main() -> None:
             if set(wallet_state.quantities).issubset(marks):
                 payload["equity"] = wallet_state.equity(marks)
             print(json.dumps(payload, indent=2, sort_keys=True))
+        elif args.command == "llm-review-status":
+            store = Store(args.database)
+            print(json.dumps(store.llm_review_counts(), indent=2, sort_keys=True))
+            store.close()
+        elif args.command == "export-llm-reviews":
+            store = Store(args.database)
+            output = export_pending_reviews(store, args.output, args.limit)
+            count = len(output.read_text(encoding="utf-8").splitlines())
+            store.close()
+            print(json.dumps({"output": str(output), "jobs": count}, indent=2))
         else:
             connection = sqlite3.connect(args.database)
             rows = connection.execute(

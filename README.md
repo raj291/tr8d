@@ -177,6 +177,50 @@ governor, transactional simulator, and close lock. If Laya fails or returns a
 low-confidence answer, the decision fails closed to HOLD. It has not been
 validated as a finance model.
 
+## Train Laya while the LLM stays in the background
+
+TR8D can adapt Laya's decision head to the price history already available to
+the project. The exporter creates chronological train, calibration, and
+untouched test splits. Each example uses only bars completed before its
+decision date; its BUY/SELL/HOLD target is derived later from that session's
+open-to-close return. Use a normalized CSV to train on downloaded data, or omit
+the CSV for the reproducible synthetic panel:
+
+```bash
+.venv/bin/python -m tr8d export-laya-dataset data/processed/stooq_prices.csv \
+  --output var/laya-training
+.venv/bin/python -m tr8d train-laya \
+  --dataset var/laya-training --output var/models/laya-tr8d --device cpu
+.venv/bin/python -m tr8d agent-demo --laya-model var/models/laya-tr8d
+```
+
+The local trainer freezes Laya's encoder and updates only its typed decision
+head, scorer, and type embedding. This makes one-epoch domain adaptation
+feasible on CPU and produces a directly loadable Laya checkpoint. It is
+deliberately described as supervised head-only adaptation, not as the full GPU
+RLCD procedure. The training report compares accuracy, Brier score, and
+calibration on the untouched temporal test set; `promoted` is true only when
+both accuracy and Brier score improve. Promotion is reported, never performed
+automatically.
+The reproducible result from the checked-in phase is recorded in
+`reports/laya-training-report.json`; the 807 MB loadable checkpoint remains in
+ignored local `var/models/laya-tr8d` rather than being committed to Git.
+
+Every persisted decision also creates an immutable `PENDING` LLM review job.
+No LLM is called in the trading process: a separate worker can consume these
+jobs later through the `LLMTeacherProvider` interface, leaving Laya and the
+deterministic risk gates fully available when the LLM is slow or offline.
+
+```bash
+.venv/bin/python -m tr8d llm-review-status --database var/agent-demo.db
+.venv/bin/python -m tr8d export-llm-reviews --database var/agent-demo.db \
+  --output var/llm-review-jobs.jsonl
+```
+
+LLM reviews remain auditable auxiliary labels. They are not allowed to place a
+trade or silently enter training; reviewed labels can be admitted only by a
+future explicit dataset-quality step.
+
 ## Transactional paper execution
 
 Persistent wallets cannot be silently reset. Approved proposals are risk-checked

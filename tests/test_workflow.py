@@ -29,6 +29,7 @@ class AgentWorkflowTests(unittest.TestCase):
             self.assertEqual(report["audit_counts"]["paper_executions"], 1)
             self.assertEqual(report["audit_counts"]["live_portfolio_snapshots"], 1)
             self.assertEqual(report["audit_counts"]["tool_calls"], 6)
+            self.assertEqual(report["audit_counts"]["llm_review_jobs"], 1)
 
     def test_complete_demo_replay_does_not_place_a_second_fill(self):
         with tempfile.TemporaryDirectory() as directory:

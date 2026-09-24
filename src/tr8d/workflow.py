@@ -76,6 +76,7 @@ def _audit_counts(store: Store) -> dict[str, int]:
         "runs", "prices", "dataset_manifests", "documents", "document_chunks",
         "decision_runs", "tool_calls", "live_wallets", "live_positions",
         "paper_executions", "live_portfolio_snapshots", "agent_memories", "workflow_runs",
+        "llm_review_jobs",
     )
     return {
         table: int(store.connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
