@@ -12,9 +12,27 @@ import numpy as np
 
 from .decision import LayaDecisionProvider
 from .domain import PriceBar
-from .features import FEATURE_NAMES, bars_by_symbol, build_features
+from .features import FEATURE_NAMES, bars_by_symbol, build_features, training_rows
+from .laya_quality import (
+    classification_report,
+    fit_selective_policy,
+    promotion_gate,
+    selective_report,
+)
+from .model import LogisticBaseline
 
 ACTION_LABELS = ("A", "B", "C")
+RLCD_QUESTION = {
+    "action": {
+        "type": "choice",
+        "instructions": "Choose A for BUY, B for SELL, or C for HOLD.",
+        "criteria": {
+            "A": "BUY when the evidence supports positive risk-adjusted edge.",
+            "B": "SELL only when an existing position has negative risk-adjusted edge.",
+            "C": "HOLD when evidence or edge is insufficient.",
+        },
+    },
+}
 
 
 @dataclass(frozen=True)
@@ -27,6 +45,8 @@ class LayaTrainingExample:
     outcome_date: str
     realized_return: float
     feature_source_dates: tuple[str, ...]
+    prediction_source: str = "feature_heuristic"
+    portfolio_context: str = "flat"
     label_source: str = "realized_open_to_close"
 
     def __post_init__(self) -> None:
@@ -48,40 +68,67 @@ def _target(realized_return: float, threshold: float) -> str:
 
 def build_laya_examples(
     bars: list[PriceBar], threshold: float = 0.0025,
+    prediction_source: str = "expanding_logistic",
 ) -> list[LayaTrainingExample]:
     if threshold <= 0:
         raise ValueError("training threshold must be positive")
+    if prediction_source not in {"expanding_logistic", "feature_heuristic"}:
+        raise ValueError("prediction source must be expanding_logistic or feature_heuristic")
     examples: list[LayaTrainingExample] = []
     for symbol, history in bars_by_symbol(bars).items():
         for target_bar in history[11:]:
             features = build_features(history, target_bar.trading_date)
             feature_map = dict(zip(FEATURE_NAMES, features.values, strict=True))
-            volatility = max(feature_map["volatility_5d"], 1e-6)
-            signal = feature_map["return_5d"] / (4 * volatility)
-            bull_probability = float(np.clip(0.5 + signal, 0.05, 0.95))
-            expected_return = float(0.35 * feature_map["return_1d"])
-            state = {
-                "instruction": "Choose a conservative paper-trading action; C is the safe default.",
-                "symbol": symbol,
-                "bull_probability": bull_probability,
-                "expected_return": expected_return,
-                "cash": 10.0,
-                "held_quantity": 0.0,
-                "evidence": [],
-            }
+            if prediction_source == "expanding_logistic":
+                training_x, training_y, realized_returns = training_rows(
+                    history, target_bar.trading_date,
+                )
+                if len(training_x) < 30 or len(np.unique(training_y)) < 2:
+                    continue
+                prediction = LogisticBaseline().fit(
+                    training_x, training_y, realized_returns,
+                ).predict(features.values)
+                bull_probability = prediction.bull_probability
+                expected_return = prediction.expected_return
+            else:
+                volatility = max(feature_map["volatility_5d"], 1e-6)
+                signal = feature_map["return_5d"] / (4 * volatility)
+                bull_probability = float(np.clip(0.5 + signal, 0.05, 0.95))
+                expected_return = float(0.35 * feature_map["return_1d"])
             realized_return = target_bar.close / target_bar.open - 1
-            label = _target(realized_return, threshold)
-            examples.append(LayaTrainingExample(
-                state=state,
-                target_label=label,
-                target_probabilities={item: float(item == label) for item in ACTION_LABELS},
-                symbol=symbol,
-                decision_date=target_bar.trading_date.isoformat(),
-                outcome_date=target_bar.trading_date.isoformat(),
-                realized_return=realized_return,
-                feature_source_dates=tuple(item.isoformat() for item in features.source_dates),
-            ))
-    return sorted(examples, key=lambda item: (item.decision_date, item.symbol))
+            direction_label = _target(realized_return, threshold)
+            contexts = (
+                ("flat", 10.0, 0.0, "A" if direction_label == "A" else "C"),
+                ("holding", 5.0, 0.05, direction_label),
+            )
+            for portfolio_context, cash, held_quantity, label in contexts:
+                state = {
+                    "instruction": "Choose a conservative paper-trading action; C is the safe default.",
+                    "symbol": symbol,
+                    "bull_probability": bull_probability,
+                    "expected_return": expected_return,
+                    "cash": cash,
+                    "held_quantity": held_quantity,
+                    "evidence": [],
+                }
+                examples.append(LayaTrainingExample(
+                    state=state,
+                    target_label=label,
+                    target_probabilities={item: float(item == label) for item in ACTION_LABELS},
+                    symbol=symbol,
+                    decision_date=target_bar.trading_date.isoformat(),
+                    outcome_date=target_bar.trading_date.isoformat(),
+                    realized_return=realized_return,
+                    feature_source_dates=tuple(
+                        item.isoformat() for item in features.source_dates
+                    ),
+                    prediction_source=prediction_source,
+                    portfolio_context=portfolio_context,
+                ))
+    return sorted(
+        examples,
+        key=lambda item: (item.decision_date, item.symbol, item.portfolio_context),
+    )
 
 
 def temporal_split(
@@ -127,6 +174,21 @@ def write_laya_dataset(
             "".join(json.dumps(asdict(item), sort_keys=True) + "\n" for item in rows),
             encoding="utf-8",
         )
+        (output / f"{name}_rlcd.jsonl").write_text(
+            "".join(
+                json.dumps({
+                    "state": json.dumps(item.state, sort_keys=True),
+                    "questions": json.dumps(RLCD_QUESTION, sort_keys=True),
+                    "gold": json.dumps({
+                        "action": {"probabilities": item.target_probabilities},
+                    }, sort_keys=True),
+                    "decision_date": item.decision_date,
+                    "symbol": item.symbol,
+                }, sort_keys=True) + "\n"
+                for item in rows
+            ),
+            encoding="utf-8",
+        )
     manifest = {
         "format": "tr8d-laya-choice-v1",
         "schema": LayaDecisionProvider._schema,
@@ -143,6 +205,12 @@ def write_laya_dataset(
         "source": source,
         "synthetic": synthetic,
         "point_in_time_features": True,
+        "prediction_sources": sorted({item.prediction_source for item in examples}),
+        "portfolio_context_counts": {
+            context: sum(item.portfolio_context == context for item in examples)
+            for context in ("flat", "holding")
+        },
+        "rlcd_compatible_exports": True,
     }
     (output / "manifest.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8",
@@ -231,21 +299,44 @@ def _logits(model: Any, items: list[dict[str, Any]], batch_size: int, pad_id: in
     return torch.cat(collected), torch.cat(labels)
 
 
-def _metrics(logits: Any, labels: Any, temperature: float = 1.0) -> dict[str, float]:
+def _probabilities(logits: Any, temperature: float = 1.0) -> np.ndarray:
     import torch
 
-    probabilities = torch.softmax(logits / temperature, dim=-1)
-    one_hot = torch.nn.functional.one_hot(labels, num_classes=len(ACTION_LABELS)).float()
-    confidence, predicted = probabilities.max(dim=-1)
-    accuracy = (predicted == labels).float().mean().item()
-    brier = ((probabilities - one_hot) ** 2).sum(dim=-1).mean().item()
-    ece = 0.0
-    for lower in torch.linspace(0, 0.9, 10):
-        selected = (confidence >= lower) & (confidence < lower + 0.1)
-        if selected.any():
-            observed = (predicted[selected] == labels[selected]).float().mean().item()
-            ece += selected.float().mean().item() * abs(confidence[selected].mean().item() - observed)
-    return {"accuracy": accuracy, "brier": brier, "ece": ece}
+    return torch.softmax(logits / temperature, dim=-1).cpu().numpy()
+
+
+def _metrics(logits: Any, labels: Any, temperature: float = 1.0) -> dict[str, Any]:
+    return classification_report(_probabilities(logits, temperature), labels.cpu().numpy())
+
+
+def _quality_report(
+    calibration_logits: Any, calibration_labels: Any,
+    test_logits: Any, test_labels: Any, temperature: float,
+    baseline_brier: float | None, target_accuracy: float,
+    minimum_coverage: float, minimum_test_examples: int,
+) -> dict[str, Any]:
+    calibration_probabilities = _probabilities(calibration_logits, temperature)
+    test_probabilities = _probabilities(test_logits, temperature)
+    calibration_array = calibration_labels.cpu().numpy()
+    test_array = test_labels.cpu().numpy()
+    policy = fit_selective_policy(
+        calibration_probabilities, calibration_array,
+        target_accuracy=target_accuracy, minimum_coverage=minimum_coverage,
+    )
+    overall = classification_report(test_probabilities, test_array)
+    selective = selective_report(test_probabilities, test_array, policy.threshold)
+    gate = promotion_gate(
+        overall, selective, baseline_brier,
+        target_accuracy=target_accuracy,
+        minimum_coverage=minimum_coverage,
+        minimum_test_examples=minimum_test_examples,
+    )
+    return {
+        "confidence_policy": policy.as_dict(),
+        "untouched_test": overall,
+        "untouched_test_selective": selective,
+        "promotion_gate": gate,
+    }
 
 
 def _fit_temperature(logits: Any, labels: Any) -> float:
@@ -264,15 +355,28 @@ def _fit_temperature(logits: Any, labels: Any) -> float:
     return float(torch.clamp(log_temperature.exp(), 0.5, 5.0).item())
 
 
+def _safe_temperature(value: Any) -> float:
+    try:
+        return float(np.clip(float(value), 0.5, 5.0))
+    except (TypeError, ValueError):
+        return 1.0
+
+
 def train_laya_head(
     dataset_directory: str | Path, output_directory: str | Path,
     base_model: str = "convaiinnovations/laya", device: str = "cpu",
     epochs: int = 1, batch_size: int = 8, learning_rate: float = 1e-4,
     max_train_examples: int = 0, seed: int = 7,
+    target_accuracy: float = 0.85, minimum_coverage: float = 0.10,
+    minimum_test_examples: int = 500, patience: int = 2,
 ) -> dict[str, Any]:
     """CPU-safe domain adaptation of Laya's decision head using temporal labels."""
-    if epochs < 1 or batch_size < 1 or learning_rate <= 0:
+    if epochs < 1 or batch_size < 1 or learning_rate <= 0 or patience < 1:
         raise ValueError("positive epochs, batch size, and learning rate are required")
+    if not 0 < target_accuracy <= 1 or not 0 < minimum_coverage <= 1:
+        raise ValueError("target accuracy and minimum coverage must be in (0, 1]")
+    if minimum_test_examples < 1:
+        raise ValueError("minimum test examples must be positive")
     import laya
     import torch
     from safetensors.torch import save_file
@@ -290,8 +394,14 @@ def train_laya_head(
         train_examples = train_examples[:max_train_examples]
     if not train_examples or not calibration_examples or not test_examples:
         raise ValueError("training, calibration, and test splits must all be non-empty")
+    if len(train_examples) < 10:
+        raise ValueError("at least ten training examples are required")
+    validation_count = max(1, int(len(train_examples) * 0.10))
+    validation_examples = train_examples[-validation_count:]
+    train_examples = train_examples[:-validation_count]
     agent = laya.load(base_model, device=device)
     train_items = _tokenize(agent, train_examples)
+    validation_items = _tokenize(agent, validation_examples)
     calibration_items = _tokenize(agent, calibration_examples)
     test_items = _tokenize(agent, test_examples)
     target_device = agent.device
@@ -307,14 +417,38 @@ def train_laya_head(
     for component in (agent.model.head, agent.model.type_emb, agent.model.scorer):
         for parameter in component.parameters():
             parameter.requires_grad = True
-    trainable = [parameter for parameter in agent.model.parameters() if parameter.requires_grad]
+    trainable_named = [
+        (name, parameter)
+        for name, parameter in agent.model.named_parameters()
+        if parameter.requires_grad
+    ]
+    trainable = [parameter for _, parameter in trainable_named]
     optimizer = torch.optim.AdamW(trainable, lr=learning_rate, weight_decay=0.01)
     label_counts = np.bincount([item["label"] for item in train_items], minlength=3)
-    class_weights = torch.tensor(
-        [len(train_items) / max(1, 3 * count) for count in label_counts],
-        dtype=torch.float32, device=target_device,
+    imbalance_ratio = float(label_counts.max() / max(1, label_counts.min()))
+    class_weights = (
+        torch.tensor(
+            [len(train_items) / max(1, 3 * count) for count in label_counts],
+            dtype=torch.float32, device=target_device,
+        )
+        if imbalance_ratio >= 1.5 else None
     )
     losses = []
+    initial_validation_logits, initial_validation_labels = _logits(
+        agent.model, validation_items, batch_size, pad_id, target_device,
+    )
+    best_validation_loss = float(
+        torch.nn.functional.cross_entropy(
+            initial_validation_logits, initial_validation_labels,
+        ).item()
+    )
+    epoch_history = [{"epoch": 0, "validation_loss": best_validation_loss}]
+    best_epoch = 0
+    best_state = {
+        name: parameter.detach().cpu().clone()
+        for name, parameter in trainable_named
+    }
+    stale_epochs = 0
     for epoch in range(epochs):
         agent.model.train()
         agent.model.encoder.eval()
@@ -335,6 +469,32 @@ def train_laya_head(
             torch.nn.utils.clip_grad_norm_(trainable, 1.0)
             optimizer.step()
             losses.append(float(loss.item()))
+        validation_logits, validation_labels = _logits(
+            agent.model, validation_items, batch_size, pad_id, target_device,
+        )
+        validation_loss = float(
+            torch.nn.functional.cross_entropy(validation_logits, validation_labels).item()
+        )
+        epoch_history.append({
+            "epoch": epoch + 1,
+            "validation_loss": validation_loss,
+        })
+        if validation_loss < best_validation_loss - 1e-4:
+            best_validation_loss = validation_loss
+            best_epoch = epoch + 1
+            best_state = {
+                name: parameter.detach().cpu().clone()
+                for name, parameter in trainable_named
+            }
+            stale_epochs = 0
+        else:
+            stale_epochs += 1
+            if stale_epochs >= patience:
+                break
+
+    with torch.no_grad():
+        for name, parameter in trainable_named:
+            parameter.copy_(best_state[name].to(target_device))
 
     calibration_logits, calibration_labels = _logits(
         agent.model, calibration_items, batch_size, pad_id, target_device,
@@ -344,6 +504,10 @@ def train_laya_head(
         agent.model, test_items, batch_size, pad_id, target_device,
     )
     trained = _metrics(after_logits, test_labels, temperature)
+    quality = _quality_report(
+        calibration_logits, calibration_labels, after_logits, test_labels, temperature,
+        baseline["brier"], target_accuracy, minimum_coverage, minimum_test_examples,
+    )
 
     output = Path(output_directory)
     output.mkdir(parents=True, exist_ok=True)
@@ -355,22 +519,11 @@ def train_laya_head(
     agent.model.encoder.config.save_pretrained(output / "encoder")
     agent.tok.save_pretrained(output / "tokenizer")
     config = dict(agent.cfg)
-    def safe_temperature(value: Any) -> float:
-        try:
-            return float(np.clip(float(value), 0.5, 5.0))
-        except (TypeError, ValueError):
-            return 1.0
-
     temperatures = list(config.get("temperature", [1.0, 1.0, 1.0]))
-    temperatures = [safe_temperature(value) for value in (temperatures + [1.0] * 3)[:3]]
+    temperatures = [_safe_temperature(value) for value in (temperatures + [1.0] * 3)[:3]]
     temperatures[0] = temperature
     config["temperature"] = temperatures
-    buckets = {
-        name: safe_temperature(value)
-        for name, value in config.get("temperature_by_options", {}).items()
-    }
-    buckets["choice:3-5"] = temperature
-    config["temperature_by_options"] = buckets
+    config.pop("temperature_by_options", None)
     config["fine_tuned"] = True
     config["model_name"] = "tr8d-laya-head-v1"
     config["training"] = {
@@ -378,12 +531,24 @@ def train_laya_head(
         "base_model": base_model,
         "dataset_digest": manifest["digest"],
         "train_examples": len(train_examples),
+        "validation_examples": len(validation_examples),
         "epochs": epochs,
+        "best_epoch": best_epoch,
+        "early_stopping_patience": patience,
+        "class_weights_used": class_weights is not None,
         "learning_rate": learning_rate,
         "seed": seed,
     }
     (output / "rl_agent_config.json").write_text(
         json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8",
+    )
+    policy_payload = {
+        **quality["confidence_policy"],
+        "promotion_gate_passed": quality["promotion_gate"]["passed"],
+        "dataset_digest": manifest["digest"],
+    }
+    (output / "tr8d_policy.json").write_text(
+        json.dumps(policy_payload, indent=2, sort_keys=True) + "\n", encoding="utf-8",
     )
     report = {
         "status": "completed",
@@ -393,17 +558,89 @@ def train_laya_head(
         "dataset_source": manifest["source"],
         "device": str(target_device),
         "train_examples": len(train_examples),
+        "validation_examples": len(validation_examples),
         "calibration_examples": len(calibration_examples),
         "test_examples": len(test_examples),
         "epochs": epochs,
+        "epochs_completed": len(epoch_history),
+        "best_epoch": best_epoch,
+        "best_validation_loss": best_validation_loss,
+        "early_stopping_patience": patience,
+        "class_weights_used": class_weights is not None,
+        "training_label_counts": {
+            label: int(label_counts[index]) for index, label in enumerate(ACTION_LABELS)
+        },
+        "epoch_history": epoch_history,
         "mean_training_loss": float(np.mean(losses)),
         "temperature": temperature,
         "before": baseline,
         "after": trained,
-        "promoted": trained["accuracy"] > baseline["accuracy"] and trained["brier"] < baseline["brier"],
+        **quality,
+        "promoted": quality["promotion_gate"]["passed"],
         "output": str(output),
     }
     (output / "training_report.json").write_text(
         json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8",
     )
+    return report
+
+
+def evaluate_laya_checkpoint(
+    dataset_directory: str | Path, model: str | Path,
+    device: str = "cpu", batch_size: int = 8,
+    target_accuracy: float = 0.85, minimum_coverage: float = 0.10,
+    minimum_test_examples: int = 500, write_policy: bool = False,
+) -> dict[str, Any]:
+    """Audit a saved checkpoint without fitting anything on the untouched test split."""
+    import laya
+
+    agent = laya.load(str(model), device=device)
+    calibration_examples = load_laya_split(dataset_directory, "calibration")
+    test_examples = load_laya_split(dataset_directory, "test")
+    calibration_items = _tokenize(agent, calibration_examples)
+    test_items = _tokenize(agent, test_examples)
+    calibration_logits, calibration_labels = _logits(
+        agent.model, calibration_items, batch_size, agent.tok.pad_token_id, agent.device,
+    )
+    test_logits, test_labels = _logits(
+        agent.model, test_items, batch_size, agent.tok.pad_token_id, agent.device,
+    )
+    temperatures = list(agent.cfg.get("temperature", [1.0, 1.0, 1.0]))
+    temperature = _safe_temperature(
+        agent.cfg.get("temperature_by_options", {}).get(
+            "choice:3-5", temperatures[0] if temperatures else 1.0,
+        )
+    )
+    baseline_brier = None
+    model_path = Path(model)
+    prior_report_path = model_path / "training_report.json"
+    if prior_report_path.exists():
+        prior_report = json.loads(prior_report_path.read_text(encoding="utf-8"))
+        baseline_brier = prior_report.get("before", {}).get("brier")
+    quality = _quality_report(
+        calibration_logits, calibration_labels, test_logits, test_labels, temperature,
+        baseline_brier, target_accuracy, minimum_coverage, minimum_test_examples,
+    )
+    manifest = json.loads(
+        (Path(dataset_directory) / "manifest.json").read_text(encoding="utf-8")
+    )
+    report = {
+        "status": "completed",
+        "model": str(model),
+        "dataset_digest": manifest["digest"],
+        "temperature": temperature,
+        **quality,
+        "promoted": quality["promotion_gate"]["passed"],
+    }
+    if write_policy:
+        if not model_path.is_dir():
+            raise ValueError("--write-policy requires a local model directory")
+        policy_payload = {
+            **quality["confidence_policy"],
+            "promotion_gate_passed": quality["promotion_gate"]["passed"],
+            "dataset_digest": manifest["digest"],
+        }
+        (model_path / "tr8d_policy.json").write_text(
+            json.dumps(policy_payload, indent=2, sort_keys=True) + "\n", encoding="utf-8",
+        )
     return report

@@ -7,6 +7,7 @@ from dataclasses import field as dataclass_field
 from datetime import UTC, datetime
 from functools import lru_cache
 from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
 from typing import Any, ClassVar, Literal, Protocol
 
 from .domain import Action, Prediction, Proposal, RiskDecision, Wallet
@@ -175,7 +176,10 @@ class LayaDecisionProvider:
         },
     }
 
-    def __init__(self, runner: Any, confidence_threshold: float = 0.60, model_id: str = "auto"):
+    def __init__(
+        self, runner: Any, confidence_threshold: float = 0.60,
+        model_id: str = "auto", confidence_policy_source: str = "default",
+    ):
         if not 0 <= confidence_threshold <= 1:
             raise ValueError("Laya confidence threshold must be between 0 and 1")
         self.runner = runner
@@ -189,6 +193,8 @@ class LayaDecisionProvider:
             "package_version": package_version,
             "model_id": model_id,
             "confidence_threshold": confidence_threshold,
+            "confidence_kind": "answer_probability",
+            "confidence_policy_source": confidence_policy_source,
         }
 
     def structured_response(self, context: DecisionContext) -> dict:
@@ -210,7 +216,15 @@ class LayaDecisionProvider:
         }
         result = self.runner.decide(state, schema=self._schema, return_details=True)
         label = result.values.get("action", "C")
-        confidence = float(result.confidence.get("action", 0.0))
+        probabilities = result.probabilities.get("action", {})
+        entropy_confidence = float(result.confidence.get("action", 0.0))
+        raw_answer = getattr(result, "answers", {}).get("action", {})
+        confidence = float(
+            raw_answer.get(
+                "answer_confidence",
+                max(probabilities.values()) if probabilities else entropy_confidence,
+            )
+        )
         labels = {"A": "BUY", "B": "SELL", "C": "HOLD"}
         if label not in labels:
             raise ValueError("Laya returned an unsupported action label")
@@ -227,11 +241,12 @@ class LayaDecisionProvider:
         self.audit_metadata = {
             **self.audit_metadata,
             "confidence": confidence,
+            "entropy_confidence": entropy_confidence,
             "selected_label": label,
             "selected_action": selected_action,
             "effective_action": action,
             "fail_closed_reason": fail_closed_reason,
-            "probabilities": result.probabilities.get("action", {}),
+            "probabilities": probabilities,
             "routing": result.routing,
             "llm_escalation_required": confidence < self.confidence_threshold,
             "llm_escalation_reason": (
@@ -253,7 +268,8 @@ class LayaDecisionProvider:
 
 
 def load_laya_provider(
-    model_id: str = "auto", device: str | None = None, confidence_threshold: float = 0.60,
+    model_id: str = "auto", device: str | None = None,
+    confidence_threshold: float | None = None,
 ) -> LayaDecisionProvider:
     try:
         from laya import Router
@@ -262,11 +278,22 @@ def load_laya_provider(
             "Laya is the default decision provider; install it with: "
             "python -m pip install laya==0.3.20"
         ) from error
+    policy_source = "default"
+    if confidence_threshold is None:
+        confidence_threshold = 0.60
+        policy_path = Path(model_id) / "tr8d_policy.json"
+        if model_id != "auto" and policy_path.is_file():
+            policy = json.loads(policy_path.read_text(encoding="utf-8"))
+            confidence_threshold = float(policy["threshold"])
+            policy_source = str(policy_path)
+    else:
+        policy_source = "explicit"
     models = None if model_id == "auto" else {"english": model_id}
     return LayaDecisionProvider(
         Router(models=models, device=device),
         confidence_threshold=confidence_threshold,
         model_id=model_id,
+        confidence_policy_source=policy_source,
     )
 
 

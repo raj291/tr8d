@@ -1,0 +1,53 @@
+{
+  "confidence_policy": {
+    "calibration_accuracy": null,
+    "calibration_coverage": 0.0,
+    "calibration_examples": 0,
+    "confidence_kind": "answer_probability",
+    "minimum_coverage": 0.1,
+    "target_accuracy": 0.85,
+    "target_met": false,
+    "threshold": 1.0
+  },
+  "dataset_digest": "e59733279778d411674dac5583ea03a556fef1a4d956138a98e81b23455ae1e6",
+  "model": "var/models/laya-tr8d",
+  "promoted": false,
+  "promotion_gate": {
+    "checks": {
+      "beats_majority_baseline": true,
+      "brier_improved": true,
+      "enough_untouched_test_examples": false,
+      "selective_accuracy_met": false,
+      "selective_coverage_met": false
+    },
+    "minimum_selective_coverage": 0.1,
+    "minimum_untouched_test_examples": 500,
+    "passed": false,
+    "target_selective_accuracy": 0.85
+  },
+  "status": "completed",
+  "temperature": 1.006994366645813,
+  "untouched_test": {
+    "accuracy": 0.44871794871794873,
+    "accuracy_lift_over_majority": 0.01282051282051283,
+    "balanced_accuracy": 0.34782608695652173,
+    "brier": 0.6648807535305808,
+    "confusion_matrix": [[1, 0, 22], [0, 0, 21], [0, 0, 34]],
+    "ece": 0.11030701108467889,
+    "examples": 78,
+    "log_loss": 1.0959447612046946,
+    "macro_f1": 0.23198198198198197,
+    "majority_baseline_accuracy": 0.4358974358974359,
+    "per_class": {
+      "A": {"f1": 0.08333333333333333, "precision": 1.0, "recall": 0.043478260869565216, "support": 23},
+      "B": {"f1": 0.0, "precision": 0.0, "recall": 0.0, "support": 21},
+      "C": {"f1": 0.6126126126126126, "precision": 0.44155844155844154, "recall": 1.0, "support": 34}
+    }
+  },
+  "untouched_test_selective": {
+    "accuracy": null,
+    "coverage": 0.0,
+    "selected_examples": 0,
+    "threshold": 1.0
+  }
+}

@@ -5,6 +5,7 @@ import json
 import sqlite3
 from dataclasses import asdict
 from datetime import date, datetime
+from pathlib import Path
 
 from .data import load_price_csv, load_stooq_csv, synthetic_prices, write_normalized_csv
 from .decision import (
@@ -23,7 +24,12 @@ from .domain import Prediction, Wallet
 from .evaluation import evaluate_models, write_model_report
 from .execution import ExecutionRejected, PaperExecutionEngine, WalletAlreadyExists
 from .explain import explain_large_move, write_explanation
-from .laya_training import build_laya_examples, train_laya_head, write_laya_dataset
+from .laya_training import (
+    build_laya_examples,
+    evaluate_laya_checkpoint,
+    train_laya_head,
+    write_laya_dataset,
+)
 from .manifest import create_manifest
 from .memory import create_memory, rank_memories
 from .replay import replay
@@ -50,6 +56,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     agent_demo.add_argument("--laya-model", default="auto")
     agent_demo.add_argument("--laya-device")
+    agent_demo.add_argument("--laya-confidence-threshold", type=float)
     real = sub.add_parser("replay", help="replay an OHLC CSV")
     real.add_argument("csv")
     real.add_argument("--database", default="var/tr8d.db")
@@ -72,6 +79,11 @@ def _parser() -> argparse.ArgumentParser:
     export_training.add_argument("--demo-days", type=int, default=240)
     export_training.add_argument("--seed", type=int, default=7)
     export_training.add_argument("--threshold", type=float, default=0.0025)
+    export_training.add_argument(
+        "--prediction-source",
+        choices=("expanding_logistic", "feature_heuristic"),
+        default="expanding_logistic",
+    )
     export_training.add_argument("--output", default="var/laya-training")
     train_laya = sub.add_parser(
         "train-laya", help="adapt Laya's decision head on temporal price labels",
@@ -85,6 +97,22 @@ def _parser() -> argparse.ArgumentParser:
     train_laya.add_argument("--learning-rate", type=float, default=1e-4)
     train_laya.add_argument("--max-train-examples", type=int, default=0)
     train_laya.add_argument("--seed", type=int, default=7)
+    train_laya.add_argument("--target-accuracy", type=float, default=0.85)
+    train_laya.add_argument("--minimum-coverage", type=float, default=0.10)
+    train_laya.add_argument("--minimum-test-examples", type=int, default=500)
+    train_laya.add_argument("--patience", type=int, default=2)
+    evaluate_laya = sub.add_parser(
+        "evaluate-laya", help="audit Laya with an untouched-test promotion gate",
+    )
+    evaluate_laya.add_argument("--dataset", default="var/laya-training")
+    evaluate_laya.add_argument("--model", default="var/models/laya-tr8d")
+    evaluate_laya.add_argument("--device", default="cpu")
+    evaluate_laya.add_argument("--batch-size", type=int, default=8)
+    evaluate_laya.add_argument("--target-accuracy", type=float, default=0.85)
+    evaluate_laya.add_argument("--minimum-coverage", type=float, default=0.10)
+    evaluate_laya.add_argument("--minimum-test-examples", type=int, default=500)
+    evaluate_laya.add_argument("--write-policy", action="store_true")
+    evaluate_laya.add_argument("--output", default="var/laya-quality-report.json")
     sec = sub.add_parser("fetch-sec", help="fetch SEC submissions with point-in-time timestamps")
     sec.add_argument("--cik", required=True)
     sec.add_argument("--symbol", required=True)
@@ -146,6 +174,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     synthesize.add_argument("--laya-model", default="auto")
     synthesize.add_argument("--laya-device")
+    synthesize.add_argument("--laya-confidence-threshold", type=float)
     synthesize.add_argument("--database", default="var/tr8d.db")
     initialize = sub.add_parser("init-wallet", help="initialize a persistent paper wallet once")
     initialize.add_argument("--agent", required=True)
@@ -186,7 +215,9 @@ def main() -> None:
     try:
         if args.command == "agent-demo":
             provider = (
-                load_laya_provider(args.laya_model, args.laya_device)
+                load_laya_provider(
+                    args.laya_model, args.laya_device, args.laya_confidence_threshold,
+                )
                 if args.provider == "laya" else DeterministicDecisionProvider()
             )
             print(json.dumps(run_agent_demo(args.database, args.agent, provider), indent=2, sort_keys=True))
@@ -215,7 +246,9 @@ def main() -> None:
         elif args.command == "export-laya-dataset":
             bars = load_price_csv(args.csv) if args.csv else synthetic_prices(args.demo_days, args.seed)
             source = args.csv or "synthetic"
-            examples = build_laya_examples(bars, args.threshold)
+            examples = build_laya_examples(
+                bars, args.threshold, prediction_source=args.prediction_source,
+            )
             manifest = write_laya_dataset(
                 examples, args.output, source=source, synthetic=args.csv is None,
             )
@@ -231,8 +264,29 @@ def main() -> None:
                 learning_rate=args.learning_rate,
                 max_train_examples=args.max_train_examples,
                 seed=args.seed,
+                target_accuracy=args.target_accuracy,
+                minimum_coverage=args.minimum_coverage,
+                minimum_test_examples=args.minimum_test_examples,
+                patience=args.patience,
             )
             print(json.dumps(report, indent=2, sort_keys=True))
+        elif args.command == "evaluate-laya":
+            report = evaluate_laya_checkpoint(
+                dataset_directory=args.dataset,
+                model=args.model,
+                device=args.device,
+                batch_size=args.batch_size,
+                target_accuracy=args.target_accuracy,
+                minimum_coverage=args.minimum_coverage,
+                minimum_test_examples=args.minimum_test_examples,
+                write_policy=args.write_policy,
+            )
+            output = Path(args.output)
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(
+                json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8",
+            )
+            print(json.dumps({"output": str(output), **report}, indent=2, sort_keys=True))
         elif args.command == "fetch-sec":
             documents = EvidenceClient(args.user_agent).sec_submissions(args.cik, args.symbol)
             path = write_documents(documents, args.output)
@@ -314,7 +368,9 @@ def main() -> None:
                 marks={key.upper(): float(value) for key, value in json.loads(args.marks).items()},
                 chunks=store.load_chunks(), memories=store.load_memories(),
                 provider=(
-                    load_laya_provider(args.laya_model, args.laya_device)
+                    load_laya_provider(
+                        args.laya_model, args.laya_device, args.laya_confidence_threshold,
+                    )
                     if args.provider == "laya" else DeterministicDecisionProvider()
                 ),
                 data_quality=args.data_quality,

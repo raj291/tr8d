@@ -198,15 +198,26 @@ The local trainer freezes Laya's encoder and updates only its typed decision
 head, scorer, and type embedding. This makes one-epoch domain adaptation
 feasible on CPU and produces a directly loadable Laya checkpoint. It is
 deliberately described as supervised head-only adaptation, not as the full GPU
-RLCD procedure. The training report compares accuracy, Brier score, and
-calibration on the untouched temporal test set; `promoted` is true only when
-both accuracy and Brier score improve. Promotion is reported, never performed
-automatically.
-The reproducible result from the checked-in phase is recorded in
-`reports/laya-training-report.json`; the 807 MB loadable checkpoint remains in
-ignored local `var/models/laya-tr8d` rather than being committed to Git.
+RLCD procedure. The report includes accuracy, balanced accuracy, macro F1,
+per-class precision/recall, confusion matrix, Brier score, log loss,
+calibration, and selective accuracy/coverage. Its confidence threshold is fit
+on calibration data and frozen before the untouched test is read. Promotion
+requires at least 85% selective accuracy at 10% coverage, 500 untouched test
+examples, performance above the majority baseline, and improved Brier score.
+Promotion is reported, never performed automatically.
 
-When Laya's confidence is below its threshold (0.60 by default), the current
+The initial synthetic checkpoint fails this stronger gate and is not promoted;
+see `reports/laya-quality-report.json`. Its local policy threshold is 1.0, so it
+fails closed to HOLD and background LLM review. The 807 MB checkpoint remains
+in ignored local `var/models/laya-tr8d` rather than being committed to Git.
+
+For a larger GPU run, open `notebooks/TR8D_Laya_Colab.ipynb`. The exporter also
+writes `train_rlcd.jsonl`, `calibration_rlcd.jsonl`, and `test_rlcd.jsonl` for
+the data shape used by Laya's official full-RLCD notebook. The complete data,
+evaluation, and promotion protocol is in `docs/LAYA_ROBUSTNESS.md`.
+
+When Laya's calibrated answer probability is below its checkpoint policy
+threshold (0.60 for an unconfigured base model), the current
 decision fails closed to HOLD and creates an immutable `PENDING` LLM review
 job. Laya provider errors trigger the same escalation. Confident Laya and
 deterministic-provider decisions do not create unnecessary jobs. No LLM is

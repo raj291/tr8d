@@ -1,13 +1,16 @@
+import json
+import sys
 import tempfile
 import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
 from tr8d.decision import (
     DeterministicDecisionProvider,
     LayaDecisionProvider,
+    load_laya_provider,
     orchestrate_decision,
     validate_proposal,
 )
@@ -103,6 +106,43 @@ class DecisionTests(unittest.TestCase):
             outcome.provider_metadata["llm_escalation_reason"],
             "laya confidence below threshold",
         )
+
+    def test_laya_gates_on_calibrated_answer_probability_not_entropy(self):
+        class FakeRunner:
+            def decide(self, state, schema, return_details):
+                return SimpleNamespace(
+                    values={"action": "A"}, confidence={"action": 0.99},
+                    probabilities={"action": {"A": 0.40, "B": 0.31, "C": 0.29}},
+                    answers={"action": {"answer_confidence": 0.40}},
+                    routing=None,
+                )
+
+        decision_time = datetime(2026, 8, 14, 13, 20, tzinfo=UTC)
+        _, chunk = evidence_chunk(decision_time - timedelta(hours=1))
+        outcome = orchestrate_decision(
+            "pattern", "AAPL", decision_time, Prediction(0.7, 0.005),
+            Wallet(10.0, {}), {"AAPL": 100.0}, [chunk], [],
+            LayaDecisionProvider(FakeRunner()),
+        )
+        self.assertEqual(outcome.proposal.action, "HOLD")
+        self.assertEqual(outcome.provider_metadata["confidence"], 0.40)
+        self.assertEqual(outcome.provider_metadata["entropy_confidence"], 0.99)
+
+    def test_local_checkpoint_loads_its_calibrated_policy_threshold(self):
+        class FakeRouter:
+            def __init__(self, models, device):
+                self.models = models
+                self.device = device
+
+        fake_laya = ModuleType("laya")
+        fake_laya.Router = FakeRouter
+        with tempfile.TemporaryDirectory() as directory:
+            policy_path = Path(directory) / "tr8d_policy.json"
+            policy_path.write_text(json.dumps({"threshold": 0.87}), encoding="utf-8")
+            with patch.dict(sys.modules, {"laya": fake_laya}):
+                provider = load_laya_provider(directory, "cpu")
+        self.assertEqual(provider.confidence_threshold, 0.87)
+        self.assertEqual(provider.audit_metadata["confidence_policy_source"], str(policy_path))
 
     def test_future_evidence_produces_hold(self):
         decision_time = datetime(2026, 8, 14, 13, 20, tzinfo=UTC)

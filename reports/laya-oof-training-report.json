@@ -1,0 +1,35 @@
+{
+  "after": {
+    "accuracy": 0.2698412698412698,
+    "accuracy_lift_over_majority": -0.1746031746031746,
+    "balanced_accuracy": 0.32051282051282054,
+    "brier": 0.672628056058187,
+    "macro_f1": 0.22685788787483707,
+    "majority_baseline_accuracy": 0.4444444444444444
+  },
+  "best_epoch": 2,
+  "best_validation_loss": 1.0936471223831177,
+  "calibration_examples": 63,
+  "confidence_policy": {
+    "calibration_accuracy": null,
+    "calibration_coverage": 0.0,
+    "calibration_examples": 0,
+    "confidence_kind": "answer_probability",
+    "minimum_coverage": 0.1,
+    "target_accuracy": 0.85,
+    "target_met": false,
+    "threshold": 1.0
+  },
+  "dataset_digest": "3ca10416918f8384579049dc15d2d47a2de338874ecd17f9b0388fa97b2c593a",
+  "dataset_source": "synthetic_expanding_logistic",
+  "early_stopping_patience": 2,
+  "epochs_requested": 6,
+  "epochs_completed": 5,
+  "class_weights_used": false,
+  "method": "supervised_head_only",
+  "promoted": false,
+  "promotion_gate_passed": false,
+  "test_examples": 63,
+  "train_examples": 262,
+  "validation_examples": 29
+}
