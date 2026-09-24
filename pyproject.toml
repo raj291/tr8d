@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tr8d"
-version = "0.4.0"
+version = "0.5.0"
 description = "Point-in-time paper-trading research simulator"
 requires-python = ">=3.11"
 dependencies = ["numpy>=1.26"]
@@ -19,3 +19,6 @@ tr8d = "tr8d.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+tr8d = ["dashboard/*.html", "dashboard/*.css", "dashboard/*.js"]

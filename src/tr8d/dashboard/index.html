@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>TR8D Market Desk</title><link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header><a class="brand" href="/"><span>TR</span>8D</a><div class="feed"><i id="feed-dot"></i><span id="feed-name">Connecting…</span></div><div id="clock">—</div></header>
+  <main>
+    <section class="hero"><div><p class="eyebrow">MARKET DATA DESK</p><h1>See the market.<br><em>Know the feed.</em></h1><p class="sub">A clean, read-only view of US equities data for the TR8D paper-trading lab.</p></div><div class="hero-stat"><span>ACTIVE FEED</span><strong id="coverage">—</strong><small id="notice">Checking data source…</small></div></section>
+    <section class="grid">
+      <article class="panel watch"><div class="panel-head"><div><p class="eyebrow">WATCHLIST</p><h2>Market pulse</h2></div><button id="refresh">Refresh</button></div><div id="quote-grid" class="quote-grid"><div class="loading">Loading quotes…</div></div><p class="timestamp" id="updated">—</p></article>
+      <article class="panel chart-panel"><div class="panel-head"><div><p class="eyebrow">PRICE HISTORY</p><h2 id="chart-title">AAPL · 90 days</h2></div><select id="symbol-select" aria-label="Chart symbol"></select></div><div id="chart-wrap"><svg id="chart" viewBox="0 0 760 310" role="img" aria-label="Historical close price chart"></svg><div id="chart-empty" class="loading hidden">No bars returned.</div></div><div class="chart-meta"><span><i class="legend"></i> Daily close</span><span id="range">—</span></div></article>
+    </section>
+    <section class="bottom"><article><p class="eyebrow">DATA HONESTY</p><h3>Coverage is explicit</h3><p>Free mode uses live IEX prices, not the consolidated SIP tape. Every response carries provider, feed, and coverage metadata.</p></article><article><p class="eyebrow">SAFE BOUNDARY</p><h3>Read only by design</h3><p>This microservice fetches market data. It has no broker credentials, order routes, or authority to place a trade.</p></article><article><p class="eyebrow">HISTORY</p><h3>One normalized shape</h3><p>Historical OHLCV bars are normalized behind the same provider interface, ready for research and replay.</p></article></section>
+  </main>
+  <footer><span>TR8D · PAPER TRADING RESEARCH</span><span id="mode">READ-ONLY MARKET DATA</span></footer>
+  <script src="/app.js"></script>
+</body></html>

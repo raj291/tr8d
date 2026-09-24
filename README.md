@@ -53,6 +53,39 @@ strategy an independent $10 wallet. Its JSON report includes return, maximum
 drawdown, annualized volatility, turnover, trade count, and cash/buy-and-hold/
 equal-weight comparisons.
 
+## Read-only US market-data dashboard
+
+TR8D now includes a dependency-free market-data microservice and dashboard.
+Run the complete UI immediately with deterministic, clearly labeled synthetic
+data:
+
+```bash
+.venv/bin/python -m tr8d market-dashboard --provider demo
+# open http://127.0.0.1:8765
+```
+
+For current US equities data, create free Alpaca API credentials and run:
+
+```bash
+export ALPACA_API_KEY_ID='your-key-id'
+export ALPACA_API_SECRET_KEY='your-secret-key'
+export ALPACA_DATA_FEED='iex'
+.venv/bin/python -m tr8d market-dashboard --provider alpaca
+```
+
+The JSON API exposes `GET /api/market/status`, `GET /api/quotes?symbols=AAPL,MSFT`,
+and `GET /api/history/AAPL?days=90&timeframe=1Day`. Symbols are allowlisted and
+normalized, quote requests are cached briefly, provider errors are returned as
+safe JSON, and credentials never reach the browser. The default free Alpaca
+feed is real-time IEX only—not the consolidated US SIP tape. Set `sip` only when
+the account has the required paid data entitlement.
+
+NYSE TOP is the Trade Operations Portal, not a free retail real-time price
+feed. TR8D therefore rejects `--provider nyse` with a precise configuration
+message instead of inventing an integration or silently presenting another
+source as NYSE data. A future licensed NYSE/SIP adapter can implement the same
+read-only provider contract without changing the dashboard.
+
 ## Ingest downloaded Stooq data
 
 Download one daily CSV per symbol from Stooq, then normalize and fingerprint
@@ -281,13 +314,14 @@ governor can reject it; only the simulator can mutate wallet state.
 
 ## Data and production boundaries
 
-TR8D does not consume real-time market data. It uses synthetic daily bars,
-downloaded/versioned Stooq CSVs, SEC submission metadata, and recent GDELT
-metadata. The integrated demo is deliberately synthetic and labels its
-evidence accordingly.
+TR8D can now consume read-only current and historical data through its isolated
+market-data service. Free live mode covers IEX only; it does not represent the
+consolidated US market. Research replays continue to use immutable synthetic or
+downloaded/versioned bars, while SEC and GDELT supply evidence metadata. Every
+demo and market-data response identifies its source and coverage.
 
 The research workflow is complete enough to run and audit end to end, but
-production deployment would still require licensed live data, exchange-aware
+production deployment would still require licensed consolidated data, exchange-aware
 calendars, stronger append-only storage, monitoring, secrets management,
 provider evaluation, and independent compliance/security review. No brokerage
 adapter or order-routing endpoint is included.

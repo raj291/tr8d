@@ -31,6 +31,8 @@ from .laya_training import (
     write_laya_dataset,
 )
 from .manifest import create_manifest
+from .market_data import MarketDataError, create_provider
+from .market_service import serve
 from .memory import create_memory, rank_memories
 from .replay import replay
 from .retrieval import chunk_document, rank_chunks
@@ -207,6 +209,10 @@ def _parser() -> argparse.ArgumentParser:
     export_reviews.add_argument("--limit", type=int, default=1000)
     inspect = sub.add_parser("inspect", help="show latest run results")
     inspect.add_argument("--database", default="var/tr8d.db")
+    dashboard = sub.add_parser("market-dashboard", help="serve the read-only market-data dashboard")
+    dashboard.add_argument("--provider", choices=("alpaca", "demo", "nyse"), default="demo")
+    dashboard.add_argument("--host", default="127.0.0.1")
+    dashboard.add_argument("--port", type=int, default=8765)
     return parser
 
 
@@ -426,6 +432,8 @@ def main() -> None:
             count = len(output.read_text(encoding="utf-8").splitlines())
             store.close()
             print(json.dumps({"output": str(output), "jobs": count}, indent=2))
+        elif args.command == "market-dashboard":
+            serve(create_provider(args.provider), args.host, args.port)
         else:
             connection = sqlite3.connect(args.database)
             rows = connection.execute(
@@ -438,7 +446,7 @@ def main() -> None:
                 print(f"{agent:14} equity=${equity:.4f} cash=${cash:.4f} as_of={day}")
     except (
         DecisionProviderUnavailable, EvidenceFetchError, ExecutionRejected,
-        WalletAlreadyExists, WorkflowAlreadyExists,
+        MarketDataError, WalletAlreadyExists, WorkflowAlreadyExists,
     ) as error:
         raise SystemExit(str(error)) from error
 
