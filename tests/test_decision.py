@@ -3,8 +3,14 @@ import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
-from tr8d.decision import LayaDecisionProvider, orchestrate_decision, validate_proposal
+from tr8d.decision import (
+    DeterministicDecisionProvider,
+    LayaDecisionProvider,
+    orchestrate_decision,
+    validate_proposal,
+)
 from tr8d.documents import Document
 from tr8d.domain import Prediction, Wallet
 from tr8d.retrieval import chunk_document
@@ -37,6 +43,7 @@ class DecisionTests(unittest.TestCase):
         outcome = orchestrate_decision(
             "pattern", "AAPL", decision_time, Prediction(0.7, 0.005),
             Wallet(10.0, {}), {"AAPL": 100.0}, [chunk], [],
+            provider=DeterministicDecisionProvider(),
         )
         self.assertEqual(outcome.proposal.action, "BUY")
         self.assertTrue(outcome.approved)
@@ -49,7 +56,7 @@ class DecisionTests(unittest.TestCase):
             ],
         )
 
-    def test_laya_adapter_is_advisory_and_offline_testable(self):
+    def test_laya_is_default_and_offline_testable_with_injected_runner(self):
         class FakeRunner:
             def decide(self, state, schema, return_details):
                 self.state = state
@@ -62,12 +69,14 @@ class DecisionTests(unittest.TestCase):
         decision_time = datetime(2026, 8, 14, 13, 20, tzinfo=UTC)
         _, chunk = evidence_chunk(decision_time - timedelta(hours=1))
         provider = LayaDecisionProvider(FakeRunner(), model_id="fake")
-        outcome = orchestrate_decision(
-            "pattern", "AAPL", decision_time, Prediction(0.7, 0.005),
-            Wallet(10.0, {}), {"AAPL": 100.0}, [chunk], [], provider,
-        )
+        with patch("tr8d.decision.default_decision_provider", return_value=provider):
+            outcome = orchestrate_decision(
+                "pattern", "AAPL", decision_time, Prediction(0.7, 0.005),
+                Wallet(10.0, {}), {"AAPL": 100.0}, [chunk], [],
+            )
         self.assertTrue(outcome.approved)
         self.assertEqual(outcome.proposal.action, "BUY")
+        self.assertEqual(outcome.provider_metadata["effective_action"], "BUY")
         self.assertEqual(outcome.provider_metadata["routing"], {"model": "fake"})
 
     def test_laya_low_confidence_fails_closed(self):
@@ -86,6 +95,9 @@ class DecisionTests(unittest.TestCase):
         )
         self.assertEqual(outcome.proposal.action, "HOLD")
         self.assertFalse(outcome.approved)
+        self.assertEqual(outcome.provider_metadata["selected_action"], "BUY")
+        self.assertEqual(outcome.provider_metadata["effective_action"], "HOLD")
+        self.assertEqual(outcome.provider_metadata["fail_closed_reason"], "confidence below threshold")
 
     def test_future_evidence_produces_hold(self):
         decision_time = datetime(2026, 8, 14, 13, 20, tzinfo=UTC)
@@ -93,6 +105,7 @@ class DecisionTests(unittest.TestCase):
         outcome = orchestrate_decision(
             "pattern", "AAPL", decision_time, Prediction(0.75, 0.01),
             Wallet(10.0, {}), {"AAPL": 100.0}, [future], [],
+            provider=DeterministicDecisionProvider(),
         )
         self.assertEqual(outcome.proposal.action, "HOLD")
         self.assertFalse(outcome.approved)
@@ -114,7 +127,8 @@ class DecisionTests(unittest.TestCase):
         _, chunk = evidence_chunk(decision_time - timedelta(hours=1))
         outcome = orchestrate_decision(
             "pattern", "AAPL", decision_time, Prediction(0.75, 0.01),
-            Wallet(10.0, {}), {"AAPL": 100.0}, [chunk], [], data_quality=0.4,
+            Wallet(10.0, {}), {"AAPL": 100.0}, [chunk], [],
+            provider=DeterministicDecisionProvider(), data_quality=0.4,
         )
         self.assertFalse(outcome.approved)
         self.assertEqual(outcome.gate_reason, "data quality below gate")
@@ -136,6 +150,7 @@ class DecisionTests(unittest.TestCase):
         outcome = orchestrate_decision(
             "pattern", "AAPL", decision_time, Prediction(0.7, 0.005),
             Wallet(10.0, {}), {"AAPL": 100.0}, [chunk], [],
+            provider=DeterministicDecisionProvider(),
         )
         with tempfile.TemporaryDirectory() as directory:
             store = Store(Path(directory) / "audit.db")

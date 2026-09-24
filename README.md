@@ -19,12 +19,13 @@ before news, RAG, or an LLM is allowed to influence a trade:
 
 ## Install and run the complete demo
 
-Python 3.11+ is required. The default demo is deterministic, uses synthetic
-data, needs no API key, and makes no network request.
+Python 3.11+ is required. The demo uses synthetic market data and needs no API
+key. Laya is the default decision maker; its first run downloads its model
+checkpoint, after which inference can use the local cache.
 
 ```bash
 python3 -m venv .venv
-.venv/bin/python -m pip install -e '.[dev]'
+.venv/bin/python -m pip install -e '.[agent,dev]'
 .venv/bin/python -m tr8d agent-demo
 .venv/bin/python -m unittest discover -s tests -v
 ```
@@ -32,8 +33,9 @@ python3 -m venv .venv
 `agent-demo` runs the full lifecycle in one command: it stores a versioned
 synthetic price fixture, indexes synthetic evidence, initializes a $10 paper
 wallet, creates and gates a structured decision, executes an approved fill at
-the stored session open, values the wallet at the stored close, creates a
-temporally safe episodic memory, and returns a JSON audit report. Use
+the stored session open only when Laya's proposal clears every gate, values the
+wallet at the stored close, creates any resulting temporally safe episodic
+memory, and returns a JSON audit report. Use
 `--database var/agent-demo.db` to retain its SQLite audit trail. Repeating the
 same completed workflow returns the original immutable report rather than
 placing another fill.
@@ -137,10 +139,10 @@ trade from being promoted into durable strategy knowledge.
 ## Structured decision synthesis
 
 The decision layer builds an immutable snapshot from an allowlisted tool set,
-asks a provider for an exact schema, validates every citation and timestamp,
-and sends non-HOLD proposals to the deterministic risk governor. The included
-provider is deliberately rule-based and fail-closed; a local or API LLM must
-implement the same interface and pass the same gates before it can replace it.
+asks Laya for a bounded BUY/SELL/HOLD choice, validates every citation and
+timestamp, and sends non-HOLD proposals to the deterministic risk governor.
+Laya is advisory: it cannot mutate the wallet, approve its own notional, or
+bypass the execution safeguards.
 
 ```bash
 python3 -m tr8d synthesize-decision \
@@ -155,23 +157,25 @@ Every run stores its snapshot hash, structured proposal, gate result, risk
 result, and ordered tool trace. Invalid provider output is converted to HOLD;
 the provider never mutates wallets or invokes the execution simulator.
 
-### Optional Laya provider
+### Laya decision provider
 
-Laya is supported as an opt-in advisory classifier and is never execution
-authority. Install the pinned beta package explicitly:
+Laya is the default advisory decision maker and is never execution authority.
+Install the pinned beta package explicitly or through the project extra:
 
 ```bash
 .venv/bin/python -m pip install laya==0.3.20
 # equivalent project extra:
 .venv/bin/python -m pip install -e '.[agent]'
-.venv/bin/python -m tr8d agent-demo --provider laya
+.venv/bin/python -m tr8d agent-demo
 ```
 
 The first Laya inference may download a large Hugging Face checkpoint. The
-offline deterministic provider therefore remains the default. Laya output is
-converted into the same exact proposal schema and still passes through the
-temporal evidence gate, risk governor, transactional simulator, and close
-lock. It has not been validated as a finance model.
+deterministic provider remains available only as an explicit offline fallback
+with `--provider deterministic`. Laya output is converted into the same exact
+proposal schema and still passes through the temporal evidence gate, risk
+governor, transactional simulator, and close lock. If Laya fails or returns a
+low-confidence answer, the decision fails closed to HOLD. It has not been
+validated as a finance model.
 
 ## Transactional paper execution
 

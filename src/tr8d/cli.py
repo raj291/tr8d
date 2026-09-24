@@ -7,7 +7,12 @@ from dataclasses import asdict
 from datetime import date, datetime
 
 from .data import load_price_csv, load_stooq_csv, synthetic_prices, write_normalized_csv
-from .decision import LayaDecisionProvider, orchestrate_decision
+from .decision import (
+    DecisionProviderUnavailable,
+    DeterministicDecisionProvider,
+    load_laya_provider,
+    orchestrate_decision,
+)
 from .documents import (
     EvidenceClient,
     EvidenceFetchError,
@@ -37,7 +42,10 @@ def _parser() -> argparse.ArgumentParser:
     agent_demo = sub.add_parser("agent-demo", help="run the complete paper-agent lifecycle")
     agent_demo.add_argument("--database", default=":memory:")
     agent_demo.add_argument("--agent", default="pattern-demo")
-    agent_demo.add_argument("--provider", choices=("deterministic", "laya"), default="deterministic")
+    agent_demo.add_argument(
+        "--provider", choices=("laya", "deterministic"), default="laya",
+        help="decision provider (default: laya)",
+    )
     agent_demo.add_argument("--laya-model", default="auto")
     agent_demo.add_argument("--laya-device")
     real = sub.add_parser("replay", help="replay an OHLC CSV")
@@ -108,6 +116,12 @@ def _parser() -> argparse.ArgumentParser:
     synthesize.add_argument("--positions", default="{}", help="JSON symbol-to-quantity mapping")
     synthesize.add_argument("--marks", required=True, help="JSON symbol-to-price mapping from completed data")
     synthesize.add_argument("--data-quality", type=float, default=1.0)
+    synthesize.add_argument(
+        "--provider", choices=("laya", "deterministic"), default="laya",
+        help="decision provider (default: laya)",
+    )
+    synthesize.add_argument("--laya-model", default="auto")
+    synthesize.add_argument("--laya-device")
     synthesize.add_argument("--database", default="var/tr8d.db")
     initialize = sub.add_parser("init-wallet", help="initialize a persistent paper wallet once")
     initialize.add_argument("--agent", required=True)
@@ -137,16 +151,10 @@ def main() -> None:
     args = _parser().parse_args()
     try:
         if args.command == "agent-demo":
-            provider = None
-            if args.provider == "laya":
-                try:
-                    from laya import Router
-                except ImportError as error:
-                    raise SystemExit("Laya is not installed; run: python -m pip install laya==0.3.20") from error
-                models = None if args.laya_model == "auto" else {"english": args.laya_model}
-                provider = LayaDecisionProvider(
-                    Router(models=models, device=args.laya_device), model_id=args.laya_model,
-                )
+            provider = (
+                load_laya_provider(args.laya_model, args.laya_device)
+                if args.provider == "laya" else DeterministicDecisionProvider()
+            )
             print(json.dumps(run_agent_demo(args.database, args.agent, provider), indent=2, sort_keys=True))
         elif args.command == "demo":
             result = replay(synthetic_prices(args.days, args.seed), args.database, "synthetic", args.seed, manifest_directory=args.manifest_directory)
@@ -250,6 +258,10 @@ def main() -> None:
                 wallet=Wallet(args.cash, {key.upper(): float(value) for key, value in json.loads(args.positions).items()}),
                 marks={key.upper(): float(value) for key, value in json.loads(args.marks).items()},
                 chunks=store.load_chunks(), memories=store.load_memories(),
+                provider=(
+                    load_laya_provider(args.laya_model, args.laya_device)
+                    if args.provider == "laya" else DeterministicDecisionProvider()
+                ),
                 data_quality=args.data_quality,
             )
             store.decision_outcome(outcome)
@@ -262,6 +274,7 @@ def main() -> None:
                 "approved": outcome.approved,
                 "gate_reason": outcome.gate_reason,
                 "provider": outcome.context.provider_name,
+                "provider_metadata": outcome.provider_metadata,
                 "fallback_used": outcome.fallback_used,
                 "tools": [trace.name for trace in outcome.tool_traces],
             }, indent=2, sort_keys=True))
@@ -302,7 +315,10 @@ def main() -> None:
             ).fetchall()
             for agent, equity, cash, day in rows:
                 print(f"{agent:14} equity=${equity:.4f} cash=${cash:.4f} as_of={day}")
-    except (EvidenceFetchError, ExecutionRejected, WalletAlreadyExists, WorkflowAlreadyExists) as error:
+    except (
+        DecisionProviderUnavailable, EvidenceFetchError, ExecutionRejected,
+        WalletAlreadyExists, WorkflowAlreadyExists,
+    ) as error:
         raise SystemExit(str(error)) from error
 
 

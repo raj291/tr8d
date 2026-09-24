@@ -3,7 +3,7 @@ import unittest
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
-from tr8d.decision import orchestrate_decision
+from tr8d.decision import DeterministicDecisionProvider, orchestrate_decision
 from tr8d.documents import Document
 from tr8d.domain import Prediction, Wallet
 from tr8d.execution import ExecutionRejected, PaperExecutionEngine, WalletAlreadyExists
@@ -25,6 +25,7 @@ def approved_outcome(agent_id: str = "pattern"):
     outcome = orchestrate_decision(
         agent_id, "AAPL", decision_time, Prediction(0.7, 0.005),
         Wallet(10.0, {}), {"AAPL": 100.0}, [chunk], [],
+        provider=DeterministicDecisionProvider(),
     )
     return document, chunk, outcome
 
@@ -120,6 +121,7 @@ class ExecutionTests(unittest.TestCase):
         outcome = orchestrate_decision(
             "pattern", "AAPL", decision_time, Prediction(0.5, 0.0),
             Wallet(10.0, {}), {"AAPL": 100.0}, [], [],
+            provider=DeterministicDecisionProvider(),
         )
         self.store.decision_outcome(outcome)
         self.store.commit()

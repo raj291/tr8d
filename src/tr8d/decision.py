@@ -5,6 +5,7 @@ import json
 from dataclasses import asdict, dataclass, replace
 from dataclasses import field as dataclass_field
 from datetime import UTC, datetime
+from functools import lru_cache
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any, ClassVar, Literal, Protocol
 
@@ -70,6 +71,10 @@ class DecisionProvider(Protocol):
     name: str
 
     def structured_response(self, context: DecisionContext) -> dict: ...
+
+
+class DecisionProviderUnavailable(RuntimeError):
+    pass
 
 
 def _hash_payload(payload: object) -> str:
@@ -156,7 +161,7 @@ class DeterministicDecisionProvider:
 
 
 class LayaDecisionProvider:
-    """Optional advisory adapter; deterministic gates retain final authority."""
+    """Default advisory decision maker; deterministic gates retain final authority."""
 
     name = "laya-v1"
     _schema: ClassVar[dict[str, Any]] = {
@@ -209,13 +214,23 @@ class LayaDecisionProvider:
         labels = {"A": "BUY", "B": "SELL", "C": "HOLD"}
         if label not in labels:
             raise ValueError("Laya returned an unsupported action label")
-        action = labels[label]
-        if confidence < self.confidence_threshold or not context.evidence:
+        selected_action = labels[label]
+        action = selected_action
+        fail_closed_reason = None
+        if confidence < self.confidence_threshold:
+            fail_closed_reason = "confidence below threshold"
+            action = "HOLD"
+        elif not context.evidence:
+            fail_closed_reason = "no eligible evidence"
             action = "HOLD"
         direction = {"BUY": "BULL", "SELL": "BEAR", "HOLD": "FLAT"}[action]
         self.audit_metadata = {
             **self.audit_metadata,
             "confidence": confidence,
+            "selected_label": label,
+            "selected_action": selected_action,
+            "effective_action": action,
+            "fail_closed_reason": fail_closed_reason,
             "probabilities": result.probabilities.get("action", {}),
             "routing": result.routing,
         }
@@ -230,6 +245,29 @@ class LayaDecisionProvider:
             "expected_direction": direction,
             "invalidation_conditions": ("New contradictory evidence or a risk-limit breach occurs.",),
         }
+
+
+def load_laya_provider(
+    model_id: str = "auto", device: str | None = None, confidence_threshold: float = 0.60,
+) -> LayaDecisionProvider:
+    try:
+        from laya import Router
+    except ImportError as error:
+        raise DecisionProviderUnavailable(
+            "Laya is the default decision provider; install it with: "
+            "python -m pip install laya==0.3.20"
+        ) from error
+    models = None if model_id == "auto" else {"english": model_id}
+    return LayaDecisionProvider(
+        Router(models=models, device=device),
+        confidence_threshold=confidence_threshold,
+        model_id=model_id,
+    )
+
+
+@lru_cache(maxsize=1)
+def default_decision_provider() -> LayaDecisionProvider:
+    return load_laya_provider()
 
 
 def validate_proposal(payload: dict, expected_symbol: str) -> StructuredProposal:
@@ -290,7 +328,6 @@ def orchestrate_decision(
 ) -> DecisionOutcome:
     if decision_time.tzinfo is None:
         raise ValueError("decision_time must be timezone-aware")
-    provider = provider or DeterministicDecisionProvider()
     if not 0 <= prediction.bull_probability <= 1:
         raise ValueError("bull probability must be between 0 and 1")
     if not 0 <= data_quality <= 1:
@@ -306,6 +343,7 @@ def orchestrate_decision(
         raise ValueError(f"positive marks required for all holdings: {sorted(missing_marks | invalid_marks)}")
     if symbol not in marks or marks[symbol] <= 0:
         raise ValueError("a positive completed-data mark is required for the symbol")
+    provider = provider or default_decision_provider()
     data_reference = dict(data_reference or {})
     tools = DecisionTools(chunks, memories, wallet, prediction, marks)
     wallet_snapshot = tools.get_wallet()

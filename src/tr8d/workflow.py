@@ -9,7 +9,7 @@ from pathlib import Path
 
 from .decision import (
     DecisionProvider,
-    DeterministicDecisionProvider,
+    default_decision_provider,
     orchestrate_decision,
 )
 from .documents import Document
@@ -87,8 +87,8 @@ def run_agent_demo(
     database: str | Path = ":memory:", agent_id: str = "pattern-demo",
     provider: DecisionProvider | None = None,
 ) -> dict:
-    """Run one deterministic, network-free paper-agent lifecycle."""
-    provider = provider or DeterministicDecisionProvider()
+    """Run one complete paper-agent lifecycle using Laya by default."""
+    provider = provider or default_decision_provider()
     store = Store(database)
     workflow_id = _workflow_id(agent_id, provider.name)
     existing = store.connection.execute(

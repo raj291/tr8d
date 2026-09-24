@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from tr8d.decision import DeterministicDecisionProvider
 from tr8d.workflow import run_agent_demo
 
 
@@ -11,7 +12,7 @@ class AgentWorkflowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             database = Path(directory) / "agent-demo.db"
             with patch("urllib.request.urlopen", side_effect=AssertionError("network is forbidden")):
-                report = run_agent_demo(database)
+                report = run_agent_demo(database, provider=DeterministicDecisionProvider())
 
             self.assertEqual(report["status"], "COMPLETED")
             self.assertEqual(report["mode"], "paper-only")
@@ -32,8 +33,9 @@ class AgentWorkflowTests(unittest.TestCase):
     def test_complete_demo_replay_does_not_place_a_second_fill(self):
         with tempfile.TemporaryDirectory() as directory:
             database = Path(directory) / "agent-demo.db"
-            first = run_agent_demo(database)
-            second = run_agent_demo(database)
+            provider = DeterministicDecisionProvider()
+            first = run_agent_demo(database, provider=provider)
+            second = run_agent_demo(database, provider=provider)
             self.assertEqual(first, second)
             self.assertEqual(second["audit_counts"]["paper_executions"], 1)
             self.assertEqual(second["audit_counts"]["agent_memories"], 1)
